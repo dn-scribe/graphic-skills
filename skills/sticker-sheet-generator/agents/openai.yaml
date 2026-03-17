@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sticker Sheet Generator"
+  short_description: "Generate printable themed sticker sheets"
+  default_prompt: "Use $sticker-sheet-generator to create an A4 sticker sheet from a theme, style, and sticker count."
