@@ -28,7 +28,7 @@ DEFAULT_PROVIDER = "openai"
 DEFAULT_OPENAI_PLANNER_MODEL = "gpt-4o"
 DEFAULT_OPENAI_IMAGE_MODEL = "dall-e-3"
 DEFAULT_GEMINI_PLANNER_MODEL = "gemini-1.5-pro"
-DEFAULT_GEMINI_IMAGE_MODEL = "dall-e-3"  # Fallback to OpenAI for image generation
+DEFAULT_GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
 DEFAULT_PAGES = 5
 DEFAULT_STYLE = "pure black and white coloring book line art with thick black outlines only, no gray colors, no shading, minimal detail, suitable for children"
 
@@ -354,15 +354,60 @@ def generate_image_openai(api_key: str, image_model: str, prompt: str, reference
         return None, f"Unexpected response format: {exc}"
 
 
+def build_coloring_prompt(prompt: str, reference_image: pathlib.Path | None) -> str:
+    coloring_prompt = (
+        "Pure black and white line art coloring book page. "
+        f"{prompt}. IMPORTANT: Only pure black lines on white background, absolutely no gray colors, no shading, "
+        "no gradients, thick black outlines only, simple design suitable for children to color in. "
+        "Keep the composition simple and not crowded. Keep all characters and objects fully inside the frame with "
+        "comfortable white margins and no cropped subjects at the page border."
+    )
+    if reference_image:
+        coloring_prompt = (
+            f"{coloring_prompt} Use the attached reference image only for style cues such as line weight, spacing, "
+            "and page simplicity."
+        )
+    return coloring_prompt
+
+
 def generate_image_gemini(api_key: str, image_model: str, prompt: str, reference_image: pathlib.Path | None) -> tuple[bytes | None, str | None]:
-    # Gemini doesn't support image generation, so we fall back to OpenAI
-    # But we need an OpenAI API key for this
-    openai_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPEN_AI_TOKEN")
-    if not openai_key:
-        return None, "Gemini doesn't support image generation and no OpenAI API key available for fallback"
-    
-    print("Note: Using OpenAI for image generation since Gemini doesn't support it.")
-    return generate_image_openai(openai_key, "dall-e-3", prompt, reference_image)
+    parts: list[dict[str, object]] = [{"text": build_coloring_prompt(prompt, reference_image)}]
+    if reference_image:
+        parts.append(
+            {
+                "inlineData": {
+                    "mimeType": guess_mime_type(reference_image),
+                    "data": base64.b64encode(reference_image.read_bytes()).decode("ascii"),
+                }
+            }
+        )
+
+    payload = {
+        "contents": [{"parts": parts}],
+        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+    }
+
+    try:
+        response = post_gemini_json(image_model, payload, api_key)
+        candidate_parts = response["candidates"][0]["content"]["parts"]
+        for part in candidate_parts:
+            inline_data = part.get("inlineData")
+            if not inline_data:
+                continue
+            if not str(inline_data.get("mimeType", "")).startswith("image/"):
+                continue
+            data = inline_data.get("data")
+            if not isinstance(data, str) or not data:
+                continue
+            return base64.b64decode(data), None
+        return None, "Gemini response did not include an image"
+    except SystemExit as exc:
+        error_msg = str(exc)
+        if "400" in error_msg:
+            return None, f"API error: {error_msg}"
+        return None, f"Generation failed: {error_msg}"
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        return None, f"Unexpected response format: {exc}"
 
 
 def generate_image(provider: str, api_key: str, image_model: str, prompt: str, reference_image: pathlib.Path | None = None) -> tuple[bytes | None, str | None]:
