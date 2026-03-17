@@ -27,8 +27,8 @@ GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 DEFAULT_PROVIDER = "openai"
 DEFAULT_OPENAI_PLANNER_MODEL = "gpt-4o"
 DEFAULT_OPENAI_IMAGE_MODEL = "dall-e-3"
-DEFAULT_GEMINI_PLANNER_MODEL = "gemini-1.5-pro"
-DEFAULT_GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
+DEFAULT_GEMINI_PLANNER_MODEL = "gemini-pro"
+DEFAULT_GEMINI_IMAGE_MODEL = "dall-e-3"  # Fallback to OpenAI for image generation
 DEFAULT_PAGES = 5
 DEFAULT_STYLE = "pure black and white coloring book line art with thick black outlines only, no gray colors, no shading, minimal detail, suitable for children"
 
@@ -87,6 +87,48 @@ def get_api_key(provider: str) -> str:
     return api_key
 
 
+def get_available_gemini_models(api_key: str) -> list[str]:
+    """Get list of available Gemini models that support generateContent."""
+    try:
+        url = f"{GEMINI_API_BASE_URL}?pageSize=50"
+        request = urllib.request.Request(
+            url,
+            headers={"x-goog-api-key": api_key},
+            method="GET",
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            models = []
+            for model_info in data.get("models", []):
+                model_name = model_info.get("name", "").replace("models/", "")
+                supported_methods = model_info.get("supportedGenerationMethods", [])
+                if "generateContent" in supported_methods and "gemini" in model_name.lower():
+                    models.append(model_name)
+            return models
+    except Exception:
+        # Fallback to known working models
+        return ["gemini-1.5-flash", "gemini-pro", "gemini-1.0-pro"]
+
+
+def get_working_gemini_planner_model(api_key: str) -> str:
+    """Get the first working Gemini model for planning."""
+    available_models = get_available_gemini_models(api_key)
+    
+    # Try models in order of preference
+    preferred_models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro", "gemini-1.0-pro"]
+    
+    for model in preferred_models:
+        if model in available_models:
+            return model
+    
+    # If none of our preferred models are available, try the first available one
+    if available_models:
+        return available_models[0]
+    
+    # Last resort fallback
+    return "gemini-pro"
+
+
 def has_gemini_key() -> bool:
     return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
 
@@ -96,8 +138,13 @@ def default_provider() -> str:
     return "openai"
 
 
-def default_planner_model(provider: str) -> str:
+def default_planner_model(provider: str, api_key: str | None = None) -> str:
     if provider == "gemini":
+        if api_key:
+            try:
+                return get_working_gemini_planner_model(api_key)
+            except Exception:
+                pass
         return DEFAULT_GEMINI_PLANNER_MODEL
     return DEFAULT_OPENAI_PLANNER_MODEL
 
@@ -178,30 +225,37 @@ def post_gemini_json(model: str, payload: dict, api_key: str) -> dict:
 
 def planner_messages(theme: str, style: str, pages: int) -> tuple[str, str]:
     system_prompt = (
-        "You are a coloring book planner. Return valid JSON only. "
-        "Create exactly the requested number of distinct picture descriptions for coloring book pages. "
+        "You are a coloring book planner for storyline continuity. Return valid JSON only. "
+        "Create exactly the requested number of distinct picture descriptions for coloring book pages that tell a cohesive story with CONSISTENT CHARACTERS. "
+        "First identify the main characters from the theme, then create pages that show these same characters in different scenes. "
         "Each page should be suitable for PURE BLACK AND WHITE line art with thick black outlines only. "
         "NO gray colors, NO shading, NO gradients - only pure black lines on white background. "
         "Do not include markdown fences."
     )
     user_payload = {
-        "task": "Plan a printable coloring book",
+        "task": "Plan a printable coloring book with character consistency",
         "requirements": {
             "theme": theme,
             "style": style,
             "pages": pages,
+            "character_consistency": "identify main characters and ensure they appear with the same visual characteristics across all pages",
+            "storyline": "create a logical progression of scenes that tell a cohesive story",
             "art_style": "pure black and white line art with thick black outlines only, absolutely no gray colors or shading",
+            "framing": "ensure all characters, objects, and scene elements are COMPLETELY contained within the page boundaries with comfortable white margins. NO cropped or cut-off elements at any edge.",
             "complexity": "appropriate detail level for coloring activities",
-            "consistency": "maintain characters and style across pages for story continuity",
         },
         "output_schema": {
-            "theme_title": "short human-readable title",
+            "theme_title": "short human-readable title for the story",
+            "main_characters": [
+                "array of 1-3 main characters with detailed physical descriptions for consistency"
+            ],
             "picture_descriptions": [
-                f"array of exactly {pages} distinct picture concepts that work well as coloring pages"
+                f"array of exactly {pages} distinct picture concepts that advance the story with the same characters"
             ],
             "base_prompt": (
                 "one detailed style prompt that will be used for all images to maintain consistency, "
-                "focusing on PURE black and white line art with thick black outlines only, no gray colors, no shading"
+                "focusing on PURE black and white line art with thick black outlines only, no gray colors, no shading, "
+                "and including character descriptions for consistency"
             ),
         },
     }
@@ -248,9 +302,15 @@ def build_coloring_plan_openai(
             f"Planner returned {len(picture_descriptions)} pictures; expected {pages}."
         )
 
+    # Handle main characters for consistency
+    main_characters = plan.get("main_characters", [])
+    if not isinstance(main_characters, list):
+        main_characters = []
+
     base_prompt = plan.get("base_prompt")
     if not isinstance(base_prompt, str) or not base_prompt.strip():
-        plan["base_prompt"] = f"Pure black and white coloring book style line art. {style}. Thick black outlines only, no gray colors, no shading, minimal detail, suitable for coloring."
+        character_desc = " Main characters: " + "; ".join(main_characters) if main_characters else ""
+        plan["base_prompt"] = f"Pure black and white coloring book style line art. {style}. Thick black outlines only, no gray colors, no shading, minimal detail, suitable for coloring.{character_desc}"
 
     theme_title = plan.get("theme_title")
     if not isinstance(theme_title, str) or not theme_title.strip():
@@ -271,6 +331,11 @@ def build_coloring_plan_gemini(
         "type": "object",
         "properties": {
             "theme_title": {"type": "string"},
+            "main_characters": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 5,
+            },
             "picture_descriptions": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -279,7 +344,7 @@ def build_coloring_plan_gemini(
             },
             "base_prompt": {"type": "string"},
         },
-        "required": ["theme_title", "picture_descriptions", "base_prompt"],
+        "required": ["theme_title", "main_characters", "picture_descriptions", "base_prompt"],
     }
     payload = {
         "contents": [
@@ -356,11 +421,14 @@ def generate_image_openai(api_key: str, image_model: str, prompt: str, reference
 
 def build_coloring_prompt(prompt: str, reference_image: pathlib.Path | None) -> str:
     coloring_prompt = (
-        "Pure black and white line art coloring book page. "
-        f"{prompt}. IMPORTANT: Only pure black lines on white background, absolutely no gray colors, no shading, "
+        "Pure black and white line art coloring book page suitable for children. "
+        f"{prompt}. CRITICAL REQUIREMENTS: Only pure black lines on pure white background, absolutely no gray colors, no shading, "
         "no gradients, thick black outlines only, simple design suitable for children to color in. "
-        "Keep the composition simple and not crowded. Keep all characters and objects fully inside the frame with "
-        "comfortable white margins and no cropped subjects at the page border."
+        "COMPLETE PICTURE: Ensure ALL characters, objects, and scene elements are FULLY contained within the page boundaries. "
+        "NO cropped subjects, NO cut-off elements at any edge. Leave comfortable white margins around all content. "
+        "All subjects must be completely visible and properly framed within the page. "
+        "Maintain consistent character appearances - same facial features, clothing, proportions, and distinctive characteristics across all pages. "
+        "Keep the composition simple and not crowded."
     )
     if reference_image:
         coloring_prompt = (
@@ -371,43 +439,14 @@ def build_coloring_prompt(prompt: str, reference_image: pathlib.Path | None) -> 
 
 
 def generate_image_gemini(api_key: str, image_model: str, prompt: str, reference_image: pathlib.Path | None) -> tuple[bytes | None, str | None]:
-    parts: list[dict[str, object]] = [{"text": build_coloring_prompt(prompt, reference_image)}]
-    if reference_image:
-        parts.append(
-            {
-                "inlineData": {
-                    "mimeType": guess_mime_type(reference_image),
-                    "data": base64.b64encode(reference_image.read_bytes()).decode("ascii"),
-                }
-            }
-        )
-
-    payload = {
-        "contents": [{"parts": parts}],
-        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
-    }
-
-    try:
-        response = post_gemini_json(image_model, payload, api_key)
-        candidate_parts = response["candidates"][0]["content"]["parts"]
-        for part in candidate_parts:
-            inline_data = part.get("inlineData")
-            if not inline_data:
-                continue
-            if not str(inline_data.get("mimeType", "")).startswith("image/"):
-                continue
-            data = inline_data.get("data")
-            if not isinstance(data, str) or not data:
-                continue
-            return base64.b64decode(data), None
-        return None, "Gemini response did not include an image"
-    except SystemExit as exc:
-        error_msg = str(exc)
-        if "400" in error_msg:
-            return None, f"API error: {error_msg}"
-        return None, f"Generation failed: {error_msg}"
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
-        return None, f"Unexpected response format: {exc}"
+    # Gemini doesn't support image generation, so we fall back to OpenAI
+    # But we need an OpenAI API key for this
+    openai_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPEN_AI_TOKEN")
+    if not openai_key:
+        return None, "Gemini doesn't support image generation and no OpenAI API key available for fallback"
+    
+    print("Note: Using OpenAI for image generation since Gemini doesn't support it.")
+    return generate_image_openai(openai_key, "dall-e-3", prompt, reference_image)
 
 
 def generate_image(provider: str, api_key: str, image_model: str, prompt: str, reference_image: pathlib.Path | None = None) -> tuple[bytes | None, str | None]:
@@ -564,6 +603,10 @@ Generated: {dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 - **Planner model**: {planner_model}
 - **Image model**: {image_model}
 
+## Main Characters
+
+{chr(10).join(f"- {char}" for char in plan.get("main_characters", ["Not specified"])) if plan.get("main_characters") else "- Not specified"}
+
 ## Picture Descriptions
 
 {chr(10).join(f"- {desc}" for desc in plan["picture_descriptions"])}
@@ -625,7 +668,7 @@ def main() -> int:
             replay_reference_image,
         ) = load_plan_from_markdown(replay_source)
         provider = replay_provider or args.provider or default_provider()
-        planner_model = args.planner_model or replay_planner_model or default_planner_model(provider)
+        planner_model = args.planner_model or replay_planner_model or default_planner_model(provider, get_api_key(provider) if provider == "gemini" else None)
         image_model = args.image_model or replay_image_model or default_image_model(provider)
         if reference_image is None:
             reference_image = replay_reference_image
@@ -636,7 +679,7 @@ def main() -> int:
         theme = args.theme
         style = args.style or DEFAULT_STYLE
         pages = args.pages
-        planner_model = args.planner_model or default_planner_model(provider)
+        planner_model = args.planner_model or default_planner_model(provider, get_api_key(provider) if provider == "gemini" else None)
         image_model = args.image_model or default_image_model(provider)
         api_key = get_api_key(provider)
         plan, planner_system_prompt, planner_user_prompt = build_coloring_plan(

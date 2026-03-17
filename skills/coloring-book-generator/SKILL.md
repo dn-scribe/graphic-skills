@@ -97,12 +97,31 @@ Editable sections that affect the rerun:
 
 If `Generated Image Prompts` are present, the script uses them directly. If you remove those blocks, the script rebuilds the image prompts from the edited theme, style, and picture descriptions.
 
-## What The Script Does
+## Character Consistency for Storylines
 
+**Enhanced Planning**: The script now specifically identifies and tracks main characters across pages:
+
+```bash
+python3 skills/coloring-book-generator/scripts/generate_coloring_book.py \
+  --theme "Princess Luna (golden braided hair, blue star dress, silver crown) and Spark the dragon (small, purple, orange wings) explore a magical castle" \
+  --pages 4 \
+  --output-dir tmp
+```
+
+**Character-Focused Themes**: For best results, include detailed character descriptions in your theme:
+- **Physical features**: hair color/style, clothing, distinctive accessories
+- **Character names**: helps maintain identity across pages
+- **Relationships**: how characters interact (friends, pets, siblings)
+
+**What The Script Does
+
+- **Character extraction**: Automatically identifies main characters from the theme and creates detailed descriptions for consistency
 - Uses a text model to turn the theme and style inputs into:
-  - an exact picture list for each page
+  - an exact picture list for each page that advances a cohesive storyline
+  - detailed character descriptions that get included in all image prompts
   - detailed image-generation prompts for each page
-- Uses the image model to generate the first picture as a style reference
+- Uses the image model to generate the first picture as a style and character reference
+- **Enhanced character consistency**: All subsequent pages include character descriptions and use the first page as visual reference
 - **Parallel generation**: After the first page, generates remaining pages in parallel for faster completion
 - **Pure black and white**: Generates images with only pure black lines on white background, no gray colors or shading
 - **Robust error handling**: If a page fails to generate (e.g., content policy violation), the script:
@@ -125,6 +144,7 @@ If `Generated Image Prompts` are present, the script uses them directly. If you 
 
 - **Performance**: After generating the first page for reference, remaining pages are generated in parallel (up to 3 concurrent requests) for faster completion
 - **Pure black and white**: All images use only pure black lines on white background with absolutely no gray colors, shading, or gradients
+- **Complete framing**: All coloring pages ensure that characters, objects, and scene elements are fully contained within page boundaries with no cropped or cut-off elements
 - The first generated image is used as a style reference for all subsequent pages to maintain consistency
 - **Error resilience**: The script gracefully handles content policy violations and API errors by skipping problematic pages while continuing to generate the rest
 - Failed pages are clearly reported at the end with specific error messages and documented in the plan file

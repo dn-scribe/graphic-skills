@@ -7,6 +7,26 @@
 - **💪 Error resilient** - continues despite failed pages
 - **📝 Full reproducibility** with detailed markdown plans
 
+## Character Consistency Examples
+
+For storylines with recurring characters, include detailed descriptions:
+
+```bash
+# Character-focused theme with specific descriptions
+python3 scripts/generate_coloring_book.py \
+  --theme "Captain Sam (red beard, blue sailor hat, striped shirt) and his parrot Polly (bright green, yellow beak) search for treasure on a tropical island" \
+  --pages 5 \
+  --output-dir tmp
+```
+
+```bash
+# Fantasy adventure with consistent characters
+python3 scripts/generate_coloring_book.py \
+  --theme "Wizard Ben (tall pointed hat, long gray beard, star-covered robe) and fairy friend Lily (tiny, purple dress, sparkly wand) cast spells in an enchanted forest" \
+  --pages 4 \
+  --output-dir tmp
+```
+
 ## Basic Usage
 
 Generate a 5-page underwater adventure coloring book:
@@ -74,7 +94,14 @@ The script generates:
 
 **Performance**: Pages are generated in parallel after the first reference page for faster completion.
 
-**Pure Black & White**: All images contain only pure black lines on white background with no gray colors or shading.
+**Enhanced Character Consistency**: All images contain only pure black lines on white background with no gray colors or shading.
+
+**Character Recommendations for Best Results**:
+- Include character names and detailed physical descriptions in the theme
+- Specify distinctive features (clothing, accessories, colors, size)
+- Mention character relationships and personalities
+- Use descriptive adjectives (friendly dragon, brave knight, curious kitten)
+- The first page becomes the visual reference for character consistency
 
 **Error Handling**: If some pages fail to generate (due to content policy violations or API errors):
 - The script continues with remaining pages
