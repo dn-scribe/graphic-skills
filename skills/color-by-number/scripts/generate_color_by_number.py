@@ -47,6 +47,41 @@ DEFAULT_COLORS = [
     "Black",
 ]
 
+# Approximate RGB values for common crayon/color names (used when PIL is unavailable)
+COLOR_NAME_MAP: dict[str, tuple[int, int, int]] = {
+    "red": (220, 50, 47),
+    "orange": (253, 126, 20),
+    "yellow": (255, 220, 0),
+    "green": (40, 167, 69),
+    "blue": (0, 123, 255),
+    "purple": (111, 66, 193),
+    "brown": (139, 69, 19),
+    "black": (30, 30, 30),
+    "white": (255, 255, 255),
+    "pink": (255, 182, 193),
+    "gray": (128, 128, 128),
+    "grey": (128, 128, 128),
+    "light blue": (135, 206, 235),
+    "dark blue": (0, 0, 139),
+    "sky blue": (135, 206, 235),
+    "teal": (0, 128, 128),
+    "lime": (50, 205, 50),
+    "navy": (0, 0, 128),
+    "maroon": (128, 0, 0),
+    "olive": (128, 128, 0),
+    "tan": (210, 180, 140),
+    "gold": (255, 215, 0),
+    "silver": (192, 192, 192),
+    "beige": (245, 245, 220),
+    "coral": (255, 127, 80),
+    "cyan": (0, 255, 255),
+    "magenta": (255, 0, 255),
+    "violet": (238, 130, 238),
+    "indigo": (75, 0, 130),
+    "turquoise": (64, 224, 208),
+    "salmon": (250, 128, 114),
+}
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -535,7 +570,7 @@ def build_colored_prompt(
         f"Page {page_index}: {description}. "
         f"{base_prompt}. "
         f"Use ONLY these colors: {key_text}. "
-        "Bright, vivid, flat graphic style with clear distinct color regions. "
+        "Bright, vivid, flat graphic style with clear distinct color regions and NO gradients. "
         "Simple design suitable for children. "
         "COMPLETE PICTURE: all characters, objects, and scene elements are FULLY contained within the page. "
         "NO cropped subjects, NO cut-off elements at any edge. Leave comfortable white margins."
@@ -545,30 +580,153 @@ def build_colored_prompt(
     return prompt
 
 
-def build_bw_prompt(
-    description: str,
-    base_prompt: str,
+def color_name_to_rgb(color_name: str) -> tuple[int, int, int]:
+    """Convert a color name to an RGB tuple."""
+    key = color_name.strip().lower()
+    if key in COLOR_NAME_MAP:
+        return COLOR_NAME_MAP[key]
+    # Try PIL's ImageColor for any valid CSS color name
+    try:
+        from PIL import ImageColor
+        rgb = ImageColor.getrgb(color_name)
+        return rgb[0], rgb[1], rgb[2]
+    except Exception:
+        pass
+    return (128, 128, 128)  # fallback gray
+
+
+def _draw_number(
+    draw: "ImageDraw.ImageDraw",  # type: ignore[name-defined]
+    cx: int,
+    cy: int,
+    number: int,
+    font: object,
+    font_size: int,
+) -> None:
+    """Draw a number centered at (cx, cy) with a white halo for readability."""
+    text = str(number)
+    halo = max(2, font_size // 8)
+    # Use textbbox for accurate centering when available (Pillow >= 8.0)
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font)  # type: ignore[attr-defined]
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+    except AttributeError:
+        tw, th = font_size, font_size  # fallback estimate
+    tx = cx - tw // 2
+    ty = cy - th // 2
+    # White halo so the digit is legible over any background
+    for dx in (-halo, 0, halo):
+        for dy in (-halo, 0, halo):
+            if dx != 0 or dy != 0:
+                draw.text((tx + dx, ty + dy), text, fill=(255, 255, 255), font=font)
+    draw.text((tx, ty), text, fill=(0, 0, 0), font=font)
+
+
+def create_bw_numbered_from_colored(
+    colored_path: pathlib.Path,
+    bw_path: pathlib.Path,
     colors: list[str],
-    page_index: int,
-    reference_image: pathlib.Path | None,
-) -> str:
-    """Build the prompt for the black-and-white numbered version of a page."""
-    key_text = color_key_text(colors)
-    num_colors = len(colors)
-    prompt = (
-        f"Black and white color-by-number activity page for children. "
-        f"Page {page_index}: {description}. "
-        f"{base_prompt}. "
-        "STYLE: clean thick black outlines on pure white background, flat simplified shapes, no shading, no gradients. "
-        f"NUMBER REGIONS: place a small bold number (1 through {num_colors}) inside each distinct color region "
-        f"according to this color key: {key_text}. "
-        "The numbers must be clearly legible inside their regions. "
-        "COMPLETE PICTURE: all characters, objects, and scene elements are FULLY contained within the page. "
-        "NO cropped subjects, NO cut-off elements at any edge. Leave comfortable white margins."
-    )
-    if reference_image:
-        prompt += " Use the reference image for composition and layout cues only."
-    return prompt
+) -> None:
+    """Deterministically create a B&W numbered coloring page from a colored image.
+
+    Algorithm:
+    1. Load the colored image and quantize every pixel to the nearest palette color
+       (using PIL's built-in palette quantization – no dithering).
+    2. Build an edge mask: every pixel that borders a pixel of a different palette
+       color is marked as an edge and painted black.
+    3. Walk a regular grid across the image; wherever the grid point is not on an
+       edge, place the palette-color number for that region.
+    4. Ensure every palette color that actually appears in the image has at least
+       one number placed inside it.
+    """
+    try:
+        import numpy as np
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError as exc:
+        raise SystemExit(
+            "Pillow and numpy are required for the B&W numbered conversion. "
+            "Install with: pip install Pillow numpy"
+        ) from exc
+
+    n_colors = len(colors)
+    palette_rgb = [color_name_to_rgb(c) for c in colors]
+
+    # Build a 256-entry PIL palette (PIL requires exactly 256 * 3 = 768 values)
+    flat_palette: list[int] = []
+    for r, g, b in palette_rgb:
+        flat_palette.extend([r, g, b])
+    flat_palette.extend([0] * (768 - len(flat_palette)))
+    pal_img = Image.new("P", (1, 1))
+    pal_img.putpalette(flat_palette)
+
+    # Quantize the colored image to our palette without dithering so every pixel
+    # snaps cleanly to one of the N palette colors → clean regions, clean edges.
+    img = Image.open(colored_path).convert("RGB")
+    quantized = img.quantize(palette=pal_img, dither=0)
+
+    H, W = quantized.size[1], quantized.size[0]
+    labels = np.array(quantized, dtype=np.int32)  # shape (H, W), values 0..255
+    # Clamp to valid palette range in case quantize returns indices beyond n_colors
+    labels = np.clip(labels, 0, n_colors - 1)
+
+    # Edge mask: True where a pixel borders a pixel of a different label
+    edge_mask = np.zeros((H, W), dtype=bool)
+    edge_mask[:-1, :] |= labels[:-1, :] != labels[1:, :]   # pixel vs pixel below
+    edge_mask[1:, :] |= labels[:-1, :] != labels[1:, :]    # mirror upward
+    edge_mask[:, :-1] |= labels[:, :-1] != labels[:, 1:]   # pixel vs pixel right
+    edge_mask[:, 1:] |= labels[:, :-1] != labels[:, 1:]    # mirror leftward
+
+    # White canvas; paint edges black
+    bw_array = np.full((H, W, 3), 255, dtype=np.uint8)
+    bw_array[edge_mask] = 0
+    bw_img = Image.fromarray(bw_array)
+    draw = ImageDraw.Draw(bw_img)
+
+    # Choose a proportional font size
+    font_size = max(14, W // 50)
+    font: object
+    for font_path in (
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ):
+        try:
+            font = ImageFont.truetype(font_path, font_size)
+            break
+        except OSError:
+            continue
+    else:
+        font = ImageFont.load_default()
+
+    # Place numbers on a regular grid (one per cell), skipping edge pixels.
+    # MIN_CELL_SIZE ensures a number appears at least every 48px even on small images;
+    # W // 16 scales the grid to the image width for larger images.
+    # Each sample point starts at cell // 2 so it sits in the center of its cell,
+    # not on the border where edges are more likely.
+    MIN_CELL_SIZE = 48
+    cell = max(MIN_CELL_SIZE, W // 16)
+    placed_labels: set[int] = set()
+
+    for cy in range(cell // 2, H, cell):
+        for cx in range(cell // 2, W, cell):
+            if edge_mask[cy, cx]:
+                continue
+            lbl = int(labels[cy, cx])
+            _draw_number(draw, cx, cy, lbl + 1, font, font_size)
+            placed_labels.add(lbl)
+
+    # Guarantee every color present in the image has at least one number.
+    # Use the centroid of non-edge pixels for the most visually central placement.
+    for lbl in sorted(set(np.unique(labels).tolist()) - placed_labels):
+        non_edge = np.argwhere((labels == lbl) & ~edge_mask)
+        if len(non_edge) == 0:
+            continue
+        # Centroid gives the most central point within the region
+        cy, cx = int(np.mean(non_edge[:, 0])), int(np.mean(non_edge[:, 1]))
+        _draw_number(draw, cx, cy, lbl + 1, font, font_size)
+
+    bw_img.save(str(bw_path), "JPEG")
 
 
 # ---------------------------------------------------------------------------
@@ -578,7 +736,12 @@ def build_bw_prompt(
 def generate_single_page(
     page_info: tuple,
 ) -> tuple[int, pathlib.Path | None, pathlib.Path | None, dict | None]:
-    """Generate one page (colored + B&W). Returns (page_index, colored_path, bw_path, failure_info)."""
+    """Generate one page (colored + deterministic B&W).
+
+    Returns (page_index, colored_path, bw_path, failure_info).
+    The B&W numbered version is derived deterministically from the colored image
+    via palette quantization + edge detection, not by a second AI generation call.
+    """
     (
         i,
         description,
@@ -596,33 +759,38 @@ def generate_single_page(
     colored_file = output_dir / f"{base_name}-page-{page_num_str}-colored.jpg"
     bw_file = output_dir / f"{base_name}-page-{page_num_str}-bw.jpg"
 
+    # --- Step 1: generate the colored version with AI ---
     colored_prompt = build_colored_prompt(description, base_prompt, colors, i, reference_image)
-    bw_prompt = build_bw_prompt(description, base_prompt, colors, i, reference_image)
-
     print(f"Generating page {i} (colored): {description[:80]}{'...' if len(description) > 80 else ''}")
     colored_bytes, colored_err = generate_image(provider, api_key, image_model, colored_prompt, reference_image)
 
-    print(f"Generating page {i} (B&W numbered): {description[:80]}{'...' if len(description) > 80 else ''}")
-    bw_bytes, bw_err = generate_image(provider, api_key, image_model, bw_prompt, None)
-
-    # If either generation failed, record a failure
-    if colored_bytes is None or bw_bytes is None:
-        errors = []
-        if colored_bytes is None:
-            errors.append(f"colored: {colored_err}")
-        if bw_bytes is None:
-            errors.append(f"b&w: {bw_err}")
+    if colored_bytes is None:
         failure_info = {
             "page": i,
             "description": description,
-            "error": "; ".join(errors),
+            "error": f"colored: {colored_err}",
         }
         print(f"⚠️  Page {i} failed: {failure_info['error']}")
         return i, None, None, failure_info
 
     convert_to_jpg(colored_bytes, colored_file)
-    convert_to_jpg(bw_bytes, bw_file)
-    print(f"✅ Page {i}: {colored_file.name} + {bw_file.name}")
+    print(f"✅ Page {i} colored: {colored_file.name}")
+
+    # --- Step 2: derive the B&W numbered version deterministically ---
+    print(f"Creating page {i} (B&W numbered from colored image)...")
+    try:
+        create_bw_numbered_from_colored(colored_file, bw_file, colors)
+        print(f"✅ Page {i} B&W: {bw_file.name}")
+    except Exception as exc:
+        failure_info = {
+            "page": i,
+            "description": description,
+            "error": f"b&w conversion failed: {exc}",
+        }
+        print(f"⚠️  Page {i} B&W conversion failed: {exc}")
+        # Return colored as partial success; bw is None to signal the failure
+        return i, colored_file, None, failure_info
+
     return i, colored_file, bw_file, None
 
 

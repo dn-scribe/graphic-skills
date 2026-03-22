@@ -61,6 +61,14 @@ ensure_xcode_clt() {
   fail "Install the Apple Command Line Tools in the dialog that opened, then rerun this installer."
 }
 
+ensure_python_packages() {
+  log "Installing required Python packages (Pillow, numpy)."
+  python3 -m pip install --quiet --upgrade Pillow numpy
+  python3 -c "from PIL import Image; import numpy" 2>/dev/null \
+    || fail "Pillow or numpy could not be imported after installation."
+  log "Pillow and numpy are available."
+}
+
 ensure_sips() {
   command_exists sips || fail "sips is required and should be available on macOS."
 }
@@ -97,6 +105,7 @@ main() {
   ensure_homebrew
   ensure_python3
   ensure_xcode_clt
+  ensure_python_packages
   ensure_sips
   write_env_template
   print_next_steps

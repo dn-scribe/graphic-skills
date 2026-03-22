@@ -129,9 +129,13 @@ When `--colors` is not provided the script uses the standard 8-color crayon set:
   - an exact picture list for each page that advances a cohesive storyline
   - detailed character descriptions that get included in all image prompts
   - a base style prompt for all images
-- For each page, generates in parallel:
-  1. A **full-color** illustration matching the palette
-  2. A **black-and-white** line-art image with numbers inside regions matching the color key
+- For each page:
+  1. Generates a **full-color** illustration via AI (DALL-E) using only the specified palette colors
+  2. Derives the **black-and-white numbered** version **deterministically** from the colored image:
+     - Quantizes every pixel to the nearest palette color (no dithering)
+     - Detects boundaries between color regions and draws black outlines
+     - Places the palette-color number inside each region on a regular grid
+     - Ensures every color that appears in the image is numbered at least once
 - Exports each version as a separate JPEG file
 - Writes a Markdown plan with the color key, inputs, prompts used, and any failures
 - Supports `--provider openai` and `--provider gemini` (experimental; image generation always uses OpenAI)
@@ -141,14 +145,16 @@ When `--colors` is not provided the script uses the standard 8-color crayon set:
 
 - **For image generation**: `OPENAI_API_KEY` or `OPEN_AI_TOKEN` must be set (required)
 - **For planning**: `GEMINI_API_KEY` or `GOOGLE_API_KEY` can be set to use Gemini for planning (optional)
+- **Python packages**: `Pillow` and `numpy` (installed automatically by `install.sh`)
 - This skill currently targets macOS because it relies on `sips`
-- `scripts/install.sh` bootstraps Homebrew and Python 3 if needed, then verifies the Apple toolchain
+- `scripts/install.sh` bootstraps Homebrew, Python 3, Pillow, numpy, and verifies the Apple toolchain
 
 ## Notes
 
 - **Two files per page**: each page produces a colored JPG and a B&W numbered JPG
+- **Deterministic B&W**: the numbered page is derived from the colored image via palette quantization and edge detection – given the same colored image and palette, the B&W output is always identical
 - **Color key**: embedded in the Markdown plan for easy printing alongside the activity pages
 - **Character consistency**: the planner identifies and tracks main characters so they look the same across all pages
-- **Parallel generation**: after planning, all pages are generated in parallel (up to 3 concurrent requests)
+- **Parallel generation**: all colored pages are generated in parallel (up to 3 concurrent AI requests); B&W conversion runs immediately after each colored page is saved
 - **Error resilience**: content-policy violations and API errors cause individual pages to be skipped; the rest continue
 - Failed pages are reported at the end with specific error messages and documented in the plan file
