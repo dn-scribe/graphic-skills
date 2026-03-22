@@ -7,6 +7,8 @@ description: Create color-by-number activity pages from a theme, optional color 
 
 Use this skill to generate a color-by-number activity book with multiple pages. For every page the script produces two files: a full-color reference image and a matching black-and-white line-art image whose regions are numbered so the colorist knows which crayon to use.
 
+The generator creates **large, simple regions** perfect for coloring, with numbers placed **inside each color area** using advanced region analysis. The colored images strictly use only the specified palette colors for clean B&W conversion.
+
 You can supply your own color palette or let the script fall back to a standard 8-color crayon set.
 
 ## When To Use It

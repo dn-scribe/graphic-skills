@@ -323,6 +323,7 @@ def planner_messages(theme: str, colors: list[str], pages: int) -> tuple[str, st
         "that tell a cohesive story with CONSISTENT CHARACTERS. "
         "First identify the main characters from the theme, then create pages that show these same characters in different scenes. "
         "Each page must use ONLY the colors provided in the palette so they can be numbered accordingly. "
+        "CRITICAL: Design for BIG, SIMPLE regions that are easy to color. Avoid intricate details. "
         "Do not include markdown fences."
     )
     user_payload = {
@@ -340,11 +341,16 @@ def planner_messages(theme: str, colors: list[str], pages: int) -> tuple[str, st
                 "every scene must be expressible using ONLY the supplied color palette; "
                 "describe objects in terms of palette colors"
             ),
+            "design_simplicity": (
+                "favor LARGE, SIMPLE shapes and regions over intricate details; "
+                "each colored area should be big enough to easily fit numbers inside; "
+                "minimize small decorative elements"
+            ),
             "framing": (
                 "ensure all characters, objects, and scene elements are COMPLETELY contained within page boundaries "
                 "with comfortable white margins; NO cropped or cut-off elements at any edge"
             ),
-            "complexity": "appropriate detail level for a color-by-number activity for children",
+            "complexity": "simple design suitable for color-by-number activity for children with big regions to color",
         },
         "output_schema": {
             "theme_title": "short human-readable title for the story",
@@ -352,11 +358,11 @@ def planner_messages(theme: str, colors: list[str], pages: int) -> tuple[str, st
                 "array of 1-3 main characters with detailed physical descriptions for consistency"
             ],
             "picture_descriptions": [
-                f"array of exactly {pages} distinct picture concepts that advance the story with the same characters"
+                f"array of exactly {pages} distinct picture concepts that advance the story with the same characters using simple, large shapes"
             ],
             "base_prompt": (
-                "one detailed style prompt used for all images, referencing the palette colors and "
-                "simple flat graphic design suitable for a color-by-number activity"
+                "one detailed style prompt used for all images, emphasizing simple cartoon style with "
+                "large colored regions, bold outlines, and minimal details suitable for color-by-number"
             ),
         },
     }
@@ -412,8 +418,8 @@ def build_plan_openai(
         char_desc = " Main characters: " + "; ".join(main_characters) if main_characters else ""
         key_text = color_key_text(colors)
         plan["base_prompt"] = (
-            f"Simple flat graphic style color-by-number activity illustration. "
-            f"Color palette: {key_text}.{char_desc}"
+            f"Simple cartoon style color-by-number activity illustration with LARGE colored regions and bold outlines. "
+            f"Minimalist design with big, simple shapes. Color palette: {key_text}.{char_desc}"
         )
 
     theme_title = plan.get("theme_title")
@@ -569,9 +575,14 @@ def build_colored_prompt(
         f"Full-color illustration for a color-by-number activity book. "
         f"Page {page_index}: {description}. "
         f"{base_prompt}. "
-        f"Use ONLY these colors: {key_text}. "
-        "Bright, vivid, flat graphic style with clear distinct color regions and NO gradients. "
-        "Simple design suitable for children. "
+        f"STRICT COLOR CONSTRAINT: Use ONLY and EXACTLY these colors: {key_text}. "
+        f"Do not use any other colors, shades, or tints. "
+        "LARGE SIMPLE REGIONS: Create very large, bold, simple areas of solid flat color. "
+        "Each colored region should be big enough to easily fit numbers inside. "
+        "THICK BLACK OUTLINES: Use bold black outlines around all shapes and objects. "
+        "NO gradients, NO blending, NO subtle color variations. "
+        "Simple cartoon style with BIG shapes and LARGE color areas. "
+        "Minimalist design with fewer details but bigger, clearer regions. "
         "COMPLETE PICTURE: all characters, objects, and scene elements are FULLY contained within the page. "
         "NO cropped subjects, NO cut-off elements at any edge. Leave comfortable white margins."
     )
@@ -631,22 +642,20 @@ def create_bw_numbered_from_colored(
     """Deterministically create a B&W numbered coloring page from a colored image.
 
     Algorithm:
-    1. Load the colored image and quantize every pixel to the nearest palette color
-       (using PIL's built-in palette quantization – no dithering).
-    2. Build an edge mask: every pixel that borders a pixel of a different palette
-       color is marked as an edge and painted black.
-    3. Walk a regular grid across the image; wherever the grid point is not on an
-       edge, place the palette-color number for that region.
-    4. Ensure every palette color that actually appears in the image has at least
-       one number placed inside it.
+    1. Load the colored image and strictly quantize every pixel to the nearest palette color
+    2. Create clean color regions by aggressive quantization to ensure only palette colors exist
+    3. Build an edge mask: pixels that border different color regions are marked as edges
+    4. For each color, find all connected components and place numbers at their centroids
+    5. Ensure numbers are placed well inside regions, not near edges
     """
     try:
         import numpy as np
         from PIL import Image, ImageDraw, ImageFont
+        from scipy.ndimage import label as scipy_label
     except ImportError as exc:
         raise SystemExit(
-            "Pillow and numpy are required for the B&W numbered conversion. "
-            "Install with: pip install Pillow numpy"
+            "Pillow, numpy, and scipy are required for the B&W numbered conversion. "
+            "Install with: pip install Pillow numpy scipy"
         ) from exc
 
     n_colors = len(colors)
@@ -660,15 +669,34 @@ def create_bw_numbered_from_colored(
     pal_img = Image.new("P", (1, 1))
     pal_img.putpalette(flat_palette)
 
-    # Quantize the colored image to our palette without dithering so every pixel
-    # snaps cleanly to one of the N palette colors → clean regions, clean edges.
+    # Load and aggressively quantize to ensure only palette colors exist
     img = Image.open(colored_path).convert("RGB")
+    
+    # First quantization pass
     quantized = img.quantize(palette=pal_img, dither=0)
-
-    H, W = quantized.size[1], quantized.size[0]
-    labels = np.array(quantized, dtype=np.int32)  # shape (H, W), values 0..255
-    # Clamp to valid palette range in case quantize returns indices beyond n_colors
-    labels = np.clip(labels, 0, n_colors - 1)
+    
+    # Convert back to RGB and then snap each pixel to nearest palette color for extra precision
+    rgb_array = np.array(quantized.convert("RGB"))
+    H, W, _ = rgb_array.shape
+    
+    # Snap every pixel to exact palette colors
+    for y in range(H):
+        for x in range(W):
+            pixel = rgb_array[y, x]
+            # Find nearest palette color
+            distances = [sum((pixel[i] - palette_rgb[c][i])**2 for i in range(3)) for c in range(len(palette_rgb))]
+            nearest_color_idx = distances.index(min(distances))
+            rgb_array[y, x] = palette_rgb[nearest_color_idx]
+    
+    # Convert to label array (0 to n_colors-1)
+    labels = np.zeros((H, W), dtype=np.int32)
+    for y in range(H):
+        for x in range(W):
+            pixel = tuple(rgb_array[y, x])
+            for i, pal_color in enumerate(palette_rgb):
+                if pixel == pal_color:
+                    labels[y, x] = i
+                    break
 
     # Edge mask: True where a pixel borders a pixel of a different label
     edge_mask = np.zeros((H, W), dtype=bool)
@@ -677,6 +705,15 @@ def create_bw_numbered_from_colored(
     edge_mask[:, :-1] |= labels[:, :-1] != labels[:, 1:]   # pixel vs pixel right
     edge_mask[:, 1:] |= labels[:, :-1] != labels[:, 1:]    # mirror leftward
 
+    # Expand edge mask by a few pixels to ensure numbers are well inside regions
+    for _ in range(3):  # Dilate edge mask 3 times
+        new_edge_mask = edge_mask.copy()
+        new_edge_mask[:-1, :] |= edge_mask[1:, :]   # down
+        new_edge_mask[1:, :] |= edge_mask[:-1, :]   # up  
+        new_edge_mask[:, :-1] |= edge_mask[:, 1:]   # right
+        new_edge_mask[:, 1:] |= edge_mask[:, :-1]   # left
+        edge_mask = new_edge_mask
+
     # White canvas; paint edges black
     bw_array = np.full((H, W, 3), 255, dtype=np.uint8)
     bw_array[edge_mask] = 0
@@ -684,7 +721,7 @@ def create_bw_numbered_from_colored(
     draw = ImageDraw.Draw(bw_img)
 
     # Choose a proportional font size
-    font_size = max(14, W // 50)
+    font_size = max(16, min(W // 40, H // 40))  # Slightly bigger fonts
     font: object
     for font_path in (
         "/System/Library/Fonts/Helvetica.ttc",
@@ -699,32 +736,61 @@ def create_bw_numbered_from_colored(
     else:
         font = ImageFont.load_default()
 
-    # Place numbers on a regular grid (one per cell), skipping edge pixels.
-    # MIN_CELL_SIZE ensures a number appears at least every 48px even on small images;
-    # W // 16 scales the grid to the image width for larger images.
-    # Each sample point starts at cell // 2 so it sits in the center of its cell,
-    # not on the border where edges are more likely.
-    MIN_CELL_SIZE = 48
-    cell = max(MIN_CELL_SIZE, W // 16)
-    placed_labels: set[int] = set()
-
-    for cy in range(cell // 2, H, cell):
-        for cx in range(cell // 2, W, cell):
-            if edge_mask[cy, cx]:
+    # For each color that exists in the image, find connected components and place numbers
+    placed_numbers = 0
+    for color_idx in range(n_colors):
+        # Create mask for this color only
+        color_mask = (labels == color_idx) & ~edge_mask
+        
+        if not np.any(color_mask):
+            continue  # This color doesn't appear in non-edge regions
+            
+        # Find connected components for this color
+        labeled_regions, num_regions = scipy_label(color_mask)
+        
+        # For each connected component of this color, place a number at its centroid
+        for region_id in range(1, num_regions + 1):
+            region_mask = labeled_regions == region_id
+            region_coords = np.argwhere(region_mask)
+            
+            if len(region_coords) < 50:  # Skip very small regions
                 continue
-            lbl = int(labels[cy, cx])
-            _draw_number(draw, cx, cy, lbl + 1, font, font_size)
-            placed_labels.add(lbl)
-
-    # Guarantee every color present in the image has at least one number.
-    # Use the centroid of non-edge pixels for the most visually central placement.
-    for lbl in sorted(set(np.unique(labels).tolist()) - placed_labels):
-        non_edge = np.argwhere((labels == lbl) & ~edge_mask)
-        if len(non_edge) == 0:
-            continue
-        # Centroid gives the most central point within the region
-        cy, cx = int(np.mean(non_edge[:, 0])), int(np.mean(non_edge[:, 1]))
-        _draw_number(draw, cx, cy, lbl + 1, font, font_size)
+                
+            # Calculate centroid
+            cy = int(np.mean(region_coords[:, 0]))
+            cx = int(np.mean(region_coords[:, 1]))
+            
+            # Double-check this position is safe (not on edge and correct color)
+            if not edge_mask[cy, cx] and labels[cy, cx] == color_idx:
+                _draw_number(draw, cx, cy, color_idx + 1, font, font_size)
+                placed_numbers += 1
+                
+    # Fallback: if very few numbers were placed, use centroid approach for major regions
+    if placed_numbers < len(colors) // 2:
+        for color_idx in range(n_colors):
+            color_only_mask = (labels == color_idx)
+            if not np.any(color_only_mask):
+                continue
+                
+            # Find largest connected component for this color (ignoring edge constraints)
+            labeled_regions, num_regions = scipy_label(color_only_mask)
+            if num_regions == 0:
+                continue
+                
+            # Find the largest region
+            largest_region_id = 0
+            largest_region_size = 0
+            for region_id in range(1, num_regions + 1):
+                region_size = np.sum(labeled_regions == region_id)
+                if region_size > largest_region_size:
+                    largest_region_size = region_size
+                    largest_region_id = region_id
+                    
+            if largest_region_id > 0:
+                region_coords = np.argwhere(labeled_regions == largest_region_id)
+                cy = int(np.mean(region_coords[:, 0]))
+                cx = int(np.mean(region_coords[:, 1]))
+                _draw_number(draw, cx, cy, color_idx + 1, font, font_size)
 
     bw_img.save(str(bw_path), "JPEG")
 

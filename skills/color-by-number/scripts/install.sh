@@ -62,11 +62,11 @@ ensure_xcode_clt() {
 }
 
 ensure_python_packages() {
-  log "Installing required Python packages (Pillow, numpy)."
-  python3 -m pip install --quiet --upgrade Pillow numpy
-  python3 -c "from PIL import Image; import numpy" 2>/dev/null \
-    || fail "Pillow or numpy could not be imported after installation."
-  log "Pillow and numpy are available."
+  log "Installing required Python packages (Pillow, numpy, scipy)."
+  python3 -m pip install --quiet --upgrade Pillow numpy scipy
+  python3 -c "from PIL import Image; import numpy; from scipy.ndimage import label" 2>/dev/null \
+    || fail "Pillow, numpy, or scipy could not be imported after installation."
+  log "Pillow, numpy, and scipy are available."
 }
 
 ensure_sips() {
