@@ -1,0 +1,4 @@
+interface:
+  display_name: "Color-by-Number Generator"
+  short_description: "Generate printable color-by-number activity pages with full-color and B&W numbered versions"
+  default_prompt: "Use $color-by-number to create a color-by-number activity book from a theme, optional color palette, and number of pages."
