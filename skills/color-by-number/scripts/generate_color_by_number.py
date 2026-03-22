@@ -28,11 +28,11 @@ import urllib.request
 CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
 IMAGES_URL = "https://api.openai.com/v1/images/generations"
 GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
-DEFAULT_PROVIDER = "openai"
+DEFAULT_PROVIDER = "gemini"
 DEFAULT_OPENAI_PLANNER_MODEL = "gpt-4o"
 DEFAULT_OPENAI_IMAGE_MODEL = "dall-e-3"
-DEFAULT_GEMINI_PLANNER_MODEL = "gemini-pro"
-DEFAULT_GEMINI_IMAGE_MODEL = "dall-e-3"  # Fallback to OpenAI for image generation
+DEFAULT_GEMINI_PLANNER_MODEL = "gemini-2.5-pro"
+DEFAULT_GEMINI_IMAGE_MODEL = "gemini-3-pro-image-preview"  # Fallback to OpenAI for image generation
 DEFAULT_PAGES = 5
 
 # Standard 8-color crayon set used when --colors is not supplied
@@ -339,7 +339,14 @@ def planner_messages(theme: str, colors: list[str], pages: int) -> tuple[str, st
             "storyline": "create a logical progression of scenes that tell a cohesive story",
             "palette_usage": (
                 "every scene must be expressible using ONLY the supplied color palette; "
-                "describe objects in terms of palette colors"
+                "describe objects in terms of palette colors; "
+                "CRITICAL: each color number must ALWAYS map to the same color - "
+                "if Red is #1, then ALL red areas must be #1, never use Red for any other number"
+            ),
+            "color_consistency": (
+                "STRICT RULE: Each palette color must have exactly one number assignment. "
+                "No color should appear with different numbers. "
+                "If an object is Red (#1), all red areas must be consistently numbered 1"
             ),
             "design_simplicity": (
                 "favor LARGE, SIMPLE shapes and regions over intricate details; "
@@ -358,7 +365,7 @@ def planner_messages(theme: str, colors: list[str], pages: int) -> tuple[str, st
                 "array of 1-3 main characters with detailed physical descriptions for consistency"
             ],
             "picture_descriptions": [
-                f"array of exactly {pages} distinct picture concepts that advance the story with the same characters using simple, large shapes"
+                f"array of exactly {pages} distinct picture description STRINGS (not objects) that advance the story with the same characters using simple, large shapes"
             ],
             "base_prompt": (
                 "one detailed style prompt used for all images, emphasizing simple cartoon style with "
@@ -400,14 +407,26 @@ def build_plan_openai(
         raise SystemExit(f"Planner did not return valid JSON:\n{content}") from exc
 
     picture_descriptions = plan.get("picture_descriptions")
-    if not isinstance(picture_descriptions, list) or not all(
-        isinstance(item, str) and item.strip() for item in picture_descriptions
-    ):
+    if not isinstance(picture_descriptions, list):
         raise SystemExit(f"Planner returned invalid picture descriptions:\n{json.dumps(plan, indent=2)}")
-    if len(picture_descriptions) != pages:
+    
+    # Handle both simple strings and objects with description fields
+    processed_descriptions = []
+    for item in picture_descriptions:
+        if isinstance(item, str) and item.strip():
+            processed_descriptions.append(item.strip())
+        elif isinstance(item, dict) and "description" in item:
+            processed_descriptions.append(item["description"].strip())
+        else:
+            raise SystemExit(f"Invalid picture description format:\n{json.dumps(item, indent=2)}")
+    
+    if len(processed_descriptions) != pages:
         raise SystemExit(
-            f"Planner returned {len(picture_descriptions)} pictures; expected {pages}."
+            f"Planner returned {len(processed_descriptions)} pictures; expected {pages}."
         )
+    
+    # Update the plan with processed descriptions
+    plan["picture_descriptions"] = processed_descriptions
 
     main_characters = plan.get("main_characters", [])
     if not isinstance(main_characters, list):
@@ -419,6 +438,7 @@ def build_plan_openai(
         key_text = color_key_text(colors)
         plan["base_prompt"] = (
             f"Simple cartoon style color-by-number activity illustration with LARGE colored regions and bold outlines. "
+            f"CRITICAL: Use consistent color-number mapping - each color appears with only one number. "
             f"Minimalist design with big, simple shapes. Color palette: {key_text}.{char_desc}"
         )
 
@@ -575,12 +595,15 @@ def build_colored_prompt(
         f"Full-color illustration for a color-by-number activity book. "
         f"Page {page_index}: {description}. "
         f"{base_prompt}. "
-        f"STRICT COLOR CONSTRAINT: Use ONLY and EXACTLY these colors: {key_text}. "
-        f"Do not use any other colors, shades, or tints. "
+        f"CRITICAL COLOR RULES: Use ONLY and EXACTLY these colors: {key_text}. "
+        f"Each number must ALWAYS correspond to the same color throughout the entire image. "
+        f"1={colors[0]}, 2={colors[1] if len(colors)>1 else colors[0]}, etc. "
+        f"Do not use any other colors, shades, tints, or color variations. "
+        f"CONSISTENT COLOR MAPPING: If you use color {colors[0] if colors else 'Red'}, it must ALWAYS be number 1. "
         "LARGE SIMPLE REGIONS: Create very large, bold, simple areas of solid flat color. "
         "Each colored region should be big enough to easily fit numbers inside. "
         "THICK BLACK OUTLINES: Use bold black outlines around all shapes and objects. "
-        "NO gradients, NO blending, NO subtle color variations. "
+        "NO gradients, NO blending, NO subtle color variations, NO off-shades. "
         "Simple cartoon style with BIG shapes and LARGE color areas. "
         "Minimalist design with fewer details but bigger, clearer regions. "
         "COMPLETE PICTURE: all characters, objects, and scene elements are FULLY contained within the page. "
@@ -632,6 +655,45 @@ def _draw_number(
             if dx != 0 or dy != 0:
                 draw.text((tx + dx, ty + dy), text, fill=(255, 255, 255), font=font)
     draw.text((tx, ty), text, fill=(0, 0, 0), font=font)
+
+
+def _add_color_legend(
+    bw_img: "Image.Image",  # type: ignore[name-defined] 
+    draw: "ImageDraw.ImageDraw",  # type: ignore[name-defined]
+    colors: list[str],
+    font: object,
+    font_size: int,
+    width: int,
+    height: int,
+) -> None:
+    """Add a color legend at the bottom of the B&W image."""
+    legend_text = " | ".join(f"{i+1}={color}" for i, color in enumerate(colors))
+    
+    # Calculate text dimensions
+    try:
+        bbox = draw.textbbox((0, 0), legend_text, font=font)  # type: ignore[attr-defined]
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+    except AttributeError:
+        text_width = len(legend_text) * font_size // 2  # fallback estimate
+        text_height = font_size
+    
+    # Position at bottom center with some padding
+    padding = 10
+    legend_x = (width - text_width) // 2
+    legend_y = height - text_height - padding
+    
+    # Draw white background rectangle for legend
+    rect_padding = 5
+    draw.rectangle([
+        legend_x - rect_padding, 
+        legend_y - rect_padding,
+        legend_x + text_width + rect_padding,
+        legend_y + text_height + rect_padding
+    ], fill=(255, 255, 255), outline=(0, 0, 0), width=1)
+    
+    # Draw the legend text
+    draw.text((legend_x, legend_y), legend_text, fill=(0, 0, 0), font=font)
 
 
 def create_bw_numbered_from_colored(
@@ -792,6 +854,9 @@ def create_bw_numbered_from_colored(
                 cx = int(np.mean(region_coords[:, 1]))
                 _draw_number(draw, cx, cy, color_idx + 1, font, font_size)
 
+    # Add color legend at the bottom of the image
+    _add_color_legend(bw_img, draw, colors, font, font_size, W, H)
+    
     bw_img.save(str(bw_path), "JPEG")
 
 
