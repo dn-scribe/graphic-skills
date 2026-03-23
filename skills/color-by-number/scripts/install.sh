@@ -17,12 +17,6 @@ command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
-ensure_macos() {
-  if [[ "$(uname -s)" != "Darwin" ]]; then
-    fail "This installer currently supports macOS only."
-  fi
-}
-
 ensure_homebrew() {
   if command_exists brew; then
     return
@@ -51,26 +45,12 @@ ensure_python3() {
   command_exists python3 || fail "python3 was not found after brew install python."
 }
 
-ensure_xcode_clt() {
-  if xcode-select -p >/dev/null 2>&1; then
-    return
-  fi
-
-  log "Apple Command Line Tools are required for sips."
-  xcode-select --install || true
-  fail "Install the Apple Command Line Tools in the dialog that opened, then rerun this installer."
-}
-
 ensure_python_packages() {
   log "Installing required Python packages (Pillow, numpy, scipy)."
   python3 -m pip install --quiet --upgrade Pillow numpy scipy
   python3 -c "from PIL import Image; import numpy; from scipy.ndimage import label" 2>/dev/null \
     || fail "Pillow, numpy, or scipy could not be imported after installation."
   log "Pillow, numpy, and scipy are available."
-}
-
-ensure_sips() {
-  command_exists sips || fail "sips is required and should be available on macOS."
 }
 
 write_env_template() {
@@ -89,7 +69,6 @@ Installation complete.
 
 Requirements available:
 - python3: $(command -v python3)
-- sips: $(command -v sips)
 
 Next steps:
 1. Export your OpenAI key or Gemini key:
@@ -101,12 +80,9 @@ EOF
 }
 
 main() {
-  ensure_macos
   ensure_homebrew
   ensure_python3
-  ensure_xcode_clt
   ensure_python_packages
-  ensure_sips
   write_env_template
   print_next_steps
 }

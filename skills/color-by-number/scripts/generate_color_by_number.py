@@ -2,8 +2,8 @@
 """Generate color-by-number activity pages from a theme and color set.
 
 For every page the script produces:
-  - A full-color illustration (<base>-page-NNN-colored.jpg)
-  - A matching black-and-white line-art image with numbered regions (<base>-page-NNN-bw.jpg)
+  - A full-color palette-locked illustration (<base>-page-NNN-colored.png)
+  - A matching black-and-white line-art image with numbered regions (<base>-page-NNN-bw.png)
   - A Markdown plan file (<base>-plan.md) containing the color key and all prompts used
 """
 
@@ -13,14 +13,13 @@ import argparse
 import base64
 import concurrent.futures
 import datetime as dt
+import io
 import json
 import mimetypes
 import os
 import pathlib
 import re
-import subprocess
 import sys
-import tempfile
 import urllib.error
 import urllib.request
 
@@ -35,16 +34,14 @@ DEFAULT_GEMINI_PLANNER_MODEL = "gemini-2.5-pro"
 DEFAULT_GEMINI_IMAGE_MODEL = "gemini-3-pro-image-preview"  # Fallback to OpenAI for image generation
 DEFAULT_PAGES = 5
 
-# Standard 8-color crayon set used when --colors is not supplied
+# Standard 6-color crayon set optimized for ages 3-8 (used when --colors is not supplied)
 DEFAULT_COLORS = [
     "Red",
-    "Orange",
-    "Yellow",
+    "Blue", 
     "Green",
-    "Blue",
+    "Yellow",
+    "Orange",
     "Purple",
-    "Brown",
-    "Black",
 ]
 
 # Approximate RGB values for common crayon/color names (used when PIL is unavailable)
@@ -97,7 +94,8 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Comma-separated list of color names to use as the palette "
             "(e.g. 'Red,Blue,Green,Yellow'). "
-            f"Defaults to the standard {len(DEFAULT_COLORS)}-color crayon set."
+            f"Defaults to the standard {len(DEFAULT_COLORS)}-color crayon set optimized for ages 3-8. "
+            "Maximum 10 colors recommended for young children."
         ),
     )
     parser.add_argument(
@@ -244,13 +242,27 @@ def resolve_reference_image_path(image_path: str | None) -> pathlib.Path | None:
     return path
 
 
+def _canonicalize_color_name(color_name: str) -> str:
+    return " ".join(part.capitalize() for part in color_name.strip().split())
+
+
 def parse_colors(colors_arg: str | None) -> list[str]:
-    """Parse comma-separated color list or return the default palette."""
-    if not colors_arg:
-        return list(DEFAULT_COLORS)
-    colors = [c.strip() for c in colors_arg.split(",") if c.strip()]
-    if not colors:
-        return list(DEFAULT_COLORS)
+    """Parse and validate a comma-separated color list or return the default palette."""
+    raw_colors = list(DEFAULT_COLORS) if not colors_arg else [c.strip() for c in colors_arg.split(",") if c.strip()]
+    if not raw_colors:
+        raw_colors = list(DEFAULT_COLORS)
+
+    colors: list[str] = []
+    seen: set[str] = set()
+    for raw_color in raw_colors:
+        color = _canonicalize_color_name(raw_color)
+        key = color.lower()
+        if key in seen:
+            raise SystemExit(f"Duplicate palette color: {color}. Each color may appear only once in the numbering scheme.")
+        color_name_to_rgb(color)
+        seen.add(key)
+        colors.append(color)
+
     return colors
 
 
@@ -264,6 +276,19 @@ def color_key_markdown(colors: list[str]) -> str:
     header = "| Number | Color |\n|--------|-------|\n"
     rows = "".join(f"| {i + 1} | {color} |\n" for i, color in enumerate(colors))
     return header + rows
+
+
+def build_palette_image(colors: list[str]) -> "Image.Image":  # type: ignore[name-defined]
+    """Build a PIL palette image with the exact user palette."""
+    from PIL import Image
+
+    flat_palette: list[int] = []
+    for r, g, b in [color_name_to_rgb(c) for c in colors]:
+        flat_palette.extend([r, g, b])
+    flat_palette.extend([0] * (768 - len(flat_palette)))
+    pal_img = Image.new("P", (1, 1))
+    pal_img.putpalette(flat_palette)
+    return pal_img
 
 
 # ---------------------------------------------------------------------------
@@ -317,13 +342,26 @@ def post_gemini_json(model: str, payload: dict, api_key: str) -> dict:
 
 def planner_messages(theme: str, colors: list[str], pages: int) -> tuple[str, str]:
     key_text = color_key_text(colors)
+    
+    # Limit to optimal number of colors for young children (5-10 sections)
+    if len(colors) > 10:
+        colors = colors[:10]
+        key_text = color_key_text(colors)
+    
     system_prompt = (
-        "You are a color-by-number activity book planner. Return valid JSON only. "
-        "Create exactly the requested number of distinct picture descriptions for color-by-number pages "
+        "You are an expert educational art designer and child development specialist, "
+        "skilled at creating engaging and age-appropriate coloring activities for children ages 3-8. "
+        "Young children learn best through interactive, visual activities that combine multiple skills. "
+        "Color-by-number activities help develop number recognition, color matching, and fine motor skills. "
+        "Return valid JSON only. Create exactly the requested number of distinct picture descriptions "
         "that tell a cohesive story with CONSISTENT CHARACTERS. "
         "First identify the main characters from the theme, then create pages that show these same characters in different scenes. "
         "Each page must use ONLY the colors provided in the palette so they can be numbered accordingly. "
-        "CRITICAL: Design for BIG, SIMPLE regions that are easy to color. Avoid intricate details. "
+        "CRITICAL: Design for 5-10 distinct coloring sections maximum per page. "
+        "Each section must be large enough for ages 3-8 to color easily. "
+        "Avoid intricate details, tiny areas, or complex shapes. "
+        "Every page must include every palette color at least once as a clear solid region. "
+        "Avoid shadows, gradients, textures, and soft lighting. "
         "Do not include markdown fences."
     )
     user_payload = {
@@ -340,6 +378,7 @@ def planner_messages(theme: str, colors: list[str], pages: int) -> tuple[str, st
             "palette_usage": (
                 "every scene must be expressible using ONLY the supplied color palette; "
                 "describe objects in terms of palette colors; "
+                "every page must include all palette colors at least once; "
                 "CRITICAL: each color number must ALWAYS map to the same color - "
                 "if Red is #1, then ALL red areas must be #1, never use Red for any other number"
             ),
@@ -348,10 +387,20 @@ def planner_messages(theme: str, colors: list[str], pages: int) -> tuple[str, st
                 "No color should appear with different numbers. "
                 "If an object is Red (#1), all red areas must be consistently numbered 1"
             ),
-            "design_simplicity": (
-                "favor LARGE, SIMPLE shapes and regions over intricate details; "
-                "each colored area should be big enough to easily fit numbers inside; "
-                "minimize small decorative elements"
+            "design_requirements": (
+                "EDUCATIONAL DESIGN CONSTRAINTS for ages 3-8: "
+                "- 5-10 distinct coloring sections maximum per page "
+                "- Each section must be large enough for small hands to color easily "
+                "- Use simple, recognizable shapes appropriate for young children "
+                "- Maintain clear spacing between all sections "
+                "- Avoid tiny or intricate areas that frustrate young colorists "
+                "- Numbers must be large and clearly readable "
+                "- High contrast and clear boundaries between all sections"
+            ),
+            "age_appropriateness": (
+                "Target audience: ages 3-8 years old. "
+                "Keep designs simple, friendly, and engaging for young children. "
+                "Use basic, child-friendly themes and avoid scary or complex imagery."
             ),
             "framing": (
                 "ensure all characters, objects, and scene elements are COMPLETELY contained within page boundaries "
@@ -437,9 +486,12 @@ def build_plan_openai(
         char_desc = " Main characters: " + "; ".join(main_characters) if main_characters else ""
         key_text = color_key_text(colors)
         plan["base_prompt"] = (
-            f"Simple cartoon style color-by-number activity illustration with LARGE colored regions and bold outlines. "
+            f"Educational color-by-number illustration designed by child development specialist. "
+            f"Target age: 3-8 years. Large, simple cartoon style with bold outlines. "
+            f"5-10 distinct coloring sections maximum. Each section sized for small hands. "
             f"CRITICAL: Use consistent color-number mapping - each color appears with only one number. "
-            f"Minimalist design with big, simple shapes. Color palette: {key_text}.{char_desc}"
+            f"Use every palette color at least once. Flat solid fills only, no gradients, no shadows, no textures. "
+            f"Simple recognizable shapes. Clear spacing between sections. Color palette: {key_text}.{char_desc}"
         )
 
     theme_title = plan.get("theme_title")
@@ -589,28 +641,45 @@ def build_colored_prompt(
     page_index: int,
     reference_image: pathlib.Path | None,
 ) -> str:
-    """Build the prompt for the full-color version of a page."""
+    """Build the prompt for the full-color version of a page with educational art design principles."""
     key_text = color_key_text(colors)
+    
     prompt = (
-        f"Full-color illustration for a color-by-number activity book. "
-        f"Page {page_index}: {description}. "
-        f"{base_prompt}. "
-        f"CRITICAL COLOR RULES: Use ONLY and EXACTLY these colors: {key_text}. "
-        f"Each number must ALWAYS correspond to the same color throughout the entire image. "
-        f"1={colors[0]}, 2={colors[1] if len(colors)>1 else colors[0]}, etc. "
-        f"Do not use any other colors, shades, tints, or color variations. "
-        f"CONSISTENT COLOR MAPPING: If you use color {colors[0] if colors else 'Red'}, it must ALWAYS be number 1. "
-        "LARGE SIMPLE REGIONS: Create very large, bold, simple areas of solid flat color. "
-        "Each colored region should be big enough to easily fit numbers inside. "
-        "THICK BLACK OUTLINES: Use bold black outlines around all shapes and objects. "
-        "NO gradients, NO blending, NO subtle color variations, NO off-shades. "
-        "Simple cartoon style with BIG shapes and LARGE color areas. "
-        "Minimalist design with fewer details but bigger, clearer regions. "
-        "COMPLETE PICTURE: all characters, objects, and scene elements are FULLY contained within the page. "
-        "NO cropped subjects, NO cut-off elements at any edge. Leave comfortable white margins."
+        "ROLE: You are an expert educational art designer creating a color-by-number activity "
+        "for children ages 3-8. Your goal is number recognition, color matching, and fine motor skill development. "
+        f"THEME: {description} (Page {page_index}). "
+        f"DESIGN BRIEF: {base_prompt}. "
+        "\n\nEDUCATIONAL REQUIREMENTS:\n"
+        "- Create 5-10 distinct, large coloring sections\n"
+        "- Each section must be big enough for small hands to color easily\n"
+        "- Use simple, recognizable shapes appropriate for ages 3-8\n"
+        "- Maintain clear spacing between all sections\n"
+        "- Ensure high contrast and clear boundaries\n"
+        "- Avoid tiny or intricate areas\n"
+        "\nCOLOR SPECIFICATIONS:\n"
+        f"- STRICT PALETTE: Use ONLY these exact colors: {key_text}\n"
+        "- Every listed color must appear at least once\n"
+        "- Each number corresponds to exactly one color throughout the image\n"
+        f"- Consistent mapping: 1={colors[0]}, 2={colors[1] if len(colors)>1 else colors[0]}, etc.\n"
+        "- NO gradients, blending, shadows, or color variations\n"
+        "- Pure solid fills only\n"
+        "\nTECHNICAL SPECS:\n"
+        "- Bold black outlines around all shapes\n"
+        "- Simple vector-like cartoon style\n"
+        "- Large, clear regions for easy number placement\n"
+        "- White background with comfortable margins\n"
+        "- All elements fully contained within frame\n"
+        "- Image size: 1024x1024 pixels\n"
+        "\nQUALITY CONTROL:\n"
+        "- Verify all sections are clearly defined\n"
+        "- Ensure color combinations are child-friendly\n"
+        "- Check that complexity matches ages 3-8\n"
+        "- Confirm all palette colors are represented"
     )
+    
     if reference_image:
-        prompt += " Use the reference image for style and composition cues only."
+        prompt += "\n\nSTYLE REFERENCE: Use attached image for composition and line weight cues only."
+    
     return prompt
 
 
@@ -625,8 +694,7 @@ def color_name_to_rgb(color_name: str) -> tuple[int, int, int]:
         rgb = ImageColor.getrgb(color_name)
         return rgb[0], rgb[1], rgb[2]
     except Exception:
-        pass
-    return (128, 128, 128)  # fallback gray
+        raise SystemExit(f"Unsupported palette color: {color_name}")
 
 
 def _draw_number(
@@ -657,43 +725,144 @@ def _draw_number(
     draw.text((tx, ty), text, fill=(0, 0, 0), font=font)
 
 
-def _add_color_legend(
-    bw_img: "Image.Image",  # type: ignore[name-defined] 
+def _load_font(font_size: int) -> object:
+    """Load a readable bold font if one is available on the host system."""
+    from PIL import ImageFont
+
+    for font_path in (
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ):
+        try:
+            return ImageFont.truetype(font_path, font_size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _measure_text(
     draw: "ImageDraw.ImageDraw",  # type: ignore[name-defined]
-    colors: list[str],
+    text: str,
     font: object,
-    font_size: int,
-    width: int,
-    height: int,
-) -> None:
-    """Add a color legend at the bottom of the B&W image."""
-    legend_text = " | ".join(f"{i+1}={color}" for i, color in enumerate(colors))
-    
-    # Calculate text dimensions
+) -> tuple[int, int]:
+    """Measure text size with a fallback for older Pillow versions."""
     try:
-        bbox = draw.textbbox((0, 0), legend_text, font=font)  # type: ignore[attr-defined]
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
+        bbox = draw.textbbox((0, 0), text, font=font)  # type: ignore[attr-defined]
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
     except AttributeError:
-        text_width = len(legend_text) * font_size // 2  # fallback estimate
-        text_height = font_size
-    
-    # Position at bottom center with some padding
-    padding = 10
-    legend_x = (width - text_width) // 2
-    legend_y = height - text_height - padding
-    
-    # Draw white background rectangle for legend
-    rect_padding = 5
-    draw.rectangle([
-        legend_x - rect_padding, 
-        legend_y - rect_padding,
-        legend_x + text_width + rect_padding,
-        legend_y + text_height + rect_padding
-    ], fill=(255, 255, 255), outline=(0, 0, 0), width=1)
-    
-    # Draw the legend text
-    draw.text((legend_x, legend_y), legend_text, fill=(0, 0, 0), font=font)
+        fallback_size = getattr(font, "size", 16)
+        return len(text) * fallback_size // 2, fallback_size
+
+
+def _append_key_footer(
+    image: "Image.Image",  # type: ignore[name-defined]
+    colors: list[str],
+    mode: str,
+) -> "Image.Image":  # type: ignore[name-defined]
+    """Append a dedicated footer with the full number-to-color scheme."""
+    from PIL import Image, ImageDraw
+
+    width, height = image.size
+    font_size = max(18, min(width // 28, 34))
+    font = _load_font(font_size)
+    header_font = _load_font(max(font_size + 4, 22))
+    swatch_size = max(28, font_size + 10)
+    row_gap = 14
+    padding = 18
+    cols = 2 if len(colors) > 4 else 1
+    rows = (len(colors) + cols - 1) // cols
+    column_width = max(width // cols, 220)
+    footer_height = padding * 3 + rows * (swatch_size + row_gap) + font_size + 24
+
+    footer = Image.new("RGB", (width, footer_height), (255, 255, 255))
+    draw = ImageDraw.Draw(footer)
+    header_text = "Color Key"
+    header_width, header_height = _measure_text(draw, header_text, header_font)
+    draw.text(((width - header_width) // 2, padding), header_text, fill=(0, 0, 0), font=header_font)
+
+    top = padding * 2 + header_height
+    for index, color in enumerate(colors):
+        column = index // rows
+        row = index % rows
+        x = padding + column * column_width
+        y = top + row * (swatch_size + row_gap)
+
+        if mode == "color":
+            draw.rectangle(
+                [x, y, x + swatch_size, y + swatch_size],
+                fill=color_name_to_rgb(color),
+                outline=(0, 0, 0),
+                width=2,
+            )
+            _draw_number(draw, x + swatch_size // 2, y + swatch_size // 2, index + 1, font, font_size)
+        else:
+            draw.rectangle(
+                [x, y, x + swatch_size, y + swatch_size],
+                fill=(255, 255, 255),
+                outline=(0, 0, 0),
+                width=2,
+            )
+            _draw_number(draw, x + swatch_size // 2, y + swatch_size // 2, index + 1, font, font_size)
+
+        label_x = x + swatch_size + 12
+        label_text = f"{index + 1} = {color}"
+        text_width, text_height = _measure_text(draw, label_text, font)
+        draw.text(
+            (label_x, y + max((swatch_size - text_height) // 2, 0)),
+            label_text,
+            fill=(0, 0, 0),
+            font=font,
+        )
+
+    combined = Image.new("RGB", (width, height + footer_height), (255, 255, 255))
+    combined.paste(image, (0, 0))
+    combined.paste(footer, (0, height))
+    return combined
+
+
+def quantize_image_to_palette(
+    image: "Image.Image",  # type: ignore[name-defined]
+    colors: list[str],
+) -> tuple["Image.Image", "np.ndarray"]:  # type: ignore[name-defined]
+    """Reduce an image to exact palette colors and return RGB image plus label map."""
+    import numpy as np
+
+    palette_rgb = [color_name_to_rgb(c) for c in colors]
+    pal_img = build_palette_image(colors)
+    quantized = image.convert("RGB").quantize(palette=pal_img, dither=0)
+    rgb_array = np.array(quantized.convert("RGB"), dtype=np.uint8)
+    H, W, _ = rgb_array.shape
+    flat_pixels = rgb_array.reshape(-1, 3).astype(np.int16)
+    palette_array = np.array(palette_rgb, dtype=np.int16)
+    label_values = np.empty(flat_pixels.shape[0], dtype=np.uint8)
+    chunk_size = 65_536
+
+    for start in range(0, flat_pixels.shape[0], chunk_size):
+        stop = min(start + chunk_size, flat_pixels.shape[0])
+        pixel_chunk = flat_pixels[start:stop]
+        diffs = pixel_chunk[:, None, :] - palette_array[None, :, :]
+        distances = np.sum(diffs.astype(np.int32) ** 2, axis=2)
+        label_values[start:stop] = np.argmin(distances, axis=1).astype(np.uint8)
+
+    labels = label_values.reshape(H, W).astype(np.int32)
+    palette_locked_rgb = np.array(palette_rgb, dtype=np.uint8)[labels]
+
+    from PIL import Image
+    return Image.fromarray(palette_locked_rgb, mode="RGB"), labels
+
+
+def save_palette_locked_colored_image(
+    image_bytes: bytes,
+    output_path: pathlib.Path,
+    colors: list[str],
+) -> None:
+    """Save a flat-color image that uses only the exact palette colors."""
+    from PIL import Image
+
+    with Image.open(io.BytesIO(image_bytes)) as source_image:
+        palette_locked_image, _ = quantize_image_to_palette(source_image.convert("RGB"), colors)
+        palette_locked_image.save(output_path, format="PNG")
 
 
 def create_bw_numbered_from_colored(
@@ -712,7 +881,7 @@ def create_bw_numbered_from_colored(
     """
     try:
         import numpy as np
-        from PIL import Image, ImageDraw, ImageFont
+        from PIL import Image, ImageDraw
         from scipy.ndimage import label as scipy_label
     except ImportError as exc:
         raise SystemExit(
@@ -721,44 +890,9 @@ def create_bw_numbered_from_colored(
         ) from exc
 
     n_colors = len(colors)
-    palette_rgb = [color_name_to_rgb(c) for c in colors]
-
-    # Build a 256-entry PIL palette (PIL requires exactly 256 * 3 = 768 values)
-    flat_palette: list[int] = []
-    for r, g, b in palette_rgb:
-        flat_palette.extend([r, g, b])
-    flat_palette.extend([0] * (768 - len(flat_palette)))
-    pal_img = Image.new("P", (1, 1))
-    pal_img.putpalette(flat_palette)
-
-    # Load and aggressively quantize to ensure only palette colors exist
-    img = Image.open(colored_path).convert("RGB")
-    
-    # First quantization pass
-    quantized = img.quantize(palette=pal_img, dither=0)
-    
-    # Convert back to RGB and then snap each pixel to nearest palette color for extra precision
-    rgb_array = np.array(quantized.convert("RGB"))
-    H, W, _ = rgb_array.shape
-    
-    # Snap every pixel to exact palette colors
-    for y in range(H):
-        for x in range(W):
-            pixel = rgb_array[y, x]
-            # Find nearest palette color
-            distances = [sum((pixel[i] - palette_rgb[c][i])**2 for i in range(3)) for c in range(len(palette_rgb))]
-            nearest_color_idx = distances.index(min(distances))
-            rgb_array[y, x] = palette_rgb[nearest_color_idx]
-    
-    # Convert to label array (0 to n_colors-1)
-    labels = np.zeros((H, W), dtype=np.int32)
-    for y in range(H):
-        for x in range(W):
-            pixel = tuple(rgb_array[y, x])
-            for i, pal_color in enumerate(palette_rgb):
-                if pixel == pal_color:
-                    labels[y, x] = i
-                    break
+    with Image.open(colored_path) as source_image:
+        _, labels = quantize_image_to_palette(source_image.convert("RGB"), colors)
+    H, W = labels.shape
 
     # Edge mask: True where a pixel borders a pixel of a different label
     edge_mask = np.zeros((H, W), dtype=bool)
@@ -784,80 +918,57 @@ def create_bw_numbered_from_colored(
 
     # Choose a proportional font size
     font_size = max(16, min(W // 40, H // 40))  # Slightly bigger fonts
-    font: object
-    for font_path in (
-        "/System/Library/Fonts/Helvetica.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-    ):
-        try:
-            font = ImageFont.truetype(font_path, font_size)
-            break
-        except OSError:
-            continue
-    else:
-        font = ImageFont.load_default()
+    font = _load_font(font_size)
 
-    # For each color that exists in the image, find connected components and place numbers
-    placed_numbers = 0
+    # Label all major regions, then guarantee one placement per present color.
+    labeled_any = False
+    colors_labeled: set[int] = set()
     for color_idx in range(n_colors):
-        # Create mask for this color only
         color_mask = (labels == color_idx) & ~edge_mask
-        
         if not np.any(color_mask):
-            continue  # This color doesn't appear in non-edge regions
-            
-        # Find connected components for this color
+            continue
+
         labeled_regions, num_regions = scipy_label(color_mask)
-        
-        # For each connected component of this color, place a number at its centroid
         for region_id in range(1, num_regions + 1):
             region_mask = labeled_regions == region_id
             region_coords = np.argwhere(region_mask)
-            
-            if len(region_coords) < 50:  # Skip very small regions
+
+            if len(region_coords) < 200:
                 continue
-                
-            # Calculate centroid
+
             cy = int(np.mean(region_coords[:, 0]))
             cx = int(np.mean(region_coords[:, 1]))
-            
-            # Double-check this position is safe (not on edge and correct color)
             if not edge_mask[cy, cx] and labels[cy, cx] == color_idx:
                 _draw_number(draw, cx, cy, color_idx + 1, font, font_size)
-                placed_numbers += 1
-                
-    # Fallback: if very few numbers were placed, use centroid approach for major regions
-    if placed_numbers < len(colors) // 2:
-        for color_idx in range(n_colors):
-            color_only_mask = (labels == color_idx)
-            if not np.any(color_only_mask):
-                continue
-                
-            # Find largest connected component for this color (ignoring edge constraints)
-            labeled_regions, num_regions = scipy_label(color_only_mask)
-            if num_regions == 0:
-                continue
-                
-            # Find the largest region
-            largest_region_id = 0
-            largest_region_size = 0
-            for region_id in range(1, num_regions + 1):
-                region_size = np.sum(labeled_regions == region_id)
-                if region_size > largest_region_size:
-                    largest_region_size = region_size
-                    largest_region_id = region_id
-                    
-            if largest_region_id > 0:
-                region_coords = np.argwhere(labeled_regions == largest_region_id)
-                cy = int(np.mean(region_coords[:, 0]))
-                cx = int(np.mean(region_coords[:, 1]))
-                _draw_number(draw, cx, cy, color_idx + 1, font, font_size)
+                labeled_any = True
+                colors_labeled.add(color_idx)
 
-    # Add color legend at the bottom of the image
-    _add_color_legend(bw_img, draw, colors, font, font_size, W, H)
-    
-    bw_img.save(str(bw_path), "JPEG")
+    for color_idx in range(n_colors):
+        if color_idx in colors_labeled:
+            continue
+        color_only_mask = labels == color_idx
+        if not np.any(color_only_mask):
+            continue
+
+        labeled_regions, num_regions = scipy_label(color_only_mask)
+        if num_regions == 0:
+            continue
+
+        region_sizes = np.bincount(labeled_regions.ravel())[1:]
+        if region_sizes.size == 0:
+            continue
+        largest_region_id = int(np.argmax(region_sizes)) + 1
+        region_coords = np.argwhere(labeled_regions == largest_region_id)
+        cy = int(np.mean(region_coords[:, 0]))
+        cx = int(np.mean(region_coords[:, 1]))
+        _draw_number(draw, cx, cy, color_idx + 1, font, font_size)
+        labeled_any = True
+
+    if not labeled_any:
+        raise SystemExit("Unable to place any numbers on the B&W page.")
+
+    bw_with_footer = _append_key_footer(bw_img, colors, mode="bw")
+    bw_with_footer.save(str(bw_path), format="PNG")
 
 
 # ---------------------------------------------------------------------------
@@ -887,8 +998,8 @@ def generate_single_page(
         page_num_str,
     ) = page_info
 
-    colored_file = output_dir / f"{base_name}-page-{page_num_str}-colored.jpg"
-    bw_file = output_dir / f"{base_name}-page-{page_num_str}-bw.jpg"
+    colored_file = output_dir / f"{base_name}-page-{page_num_str}-colored.png"
+    bw_file = output_dir / f"{base_name}-page-{page_num_str}-bw.png"
 
     # --- Step 1: generate the colored version with AI ---
     colored_prompt = build_colored_prompt(description, base_prompt, colors, i, reference_image)
@@ -904,7 +1015,7 @@ def generate_single_page(
         print(f"⚠️  Page {i} failed: {failure_info['error']}")
         return i, None, None, failure_info
 
-    convert_to_jpg(colored_bytes, colored_file)
+    save_palette_locked_colored_image(colored_bytes, colored_file, colors)
     print(f"✅ Page {i} colored: {colored_file.name}")
 
     # --- Step 2: derive the B&W numbered version deterministically ---
@@ -923,21 +1034,6 @@ def generate_single_page(
         return i, colored_file, None, failure_info
 
     return i, colored_file, bw_file, None
-
-
-def convert_to_jpg(png_bytes: bytes, output_path: pathlib.Path) -> None:
-    """Convert PNG bytes to a JPEG file using sips."""
-    with tempfile.NamedTemporaryFile(suffix=".png") as tmp:
-        tmp.write(png_bytes)
-        tmp.flush()
-        result = subprocess.run(
-            ["sips", "-s", "format", "jpeg", tmp.name, "--out", str(output_path)],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise SystemExit(f"sips conversion failed: {result.stderr}")
-
 
 # ---------------------------------------------------------------------------
 # Replay from markdown
@@ -986,6 +1082,7 @@ def load_plan_from_markdown(md_path: pathlib.Path) -> tuple[
 
     if not colors:
         colors = list(DEFAULT_COLORS)
+    colors = parse_colors(",".join(colors))
 
     key_text = color_key_text(colors)
     plan = {
@@ -1103,10 +1200,7 @@ Generated: {dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 # ---------------------------------------------------------------------------
 
 def ensure_tooling() -> None:
-    import shutil
-    for tool in ("sips",):
-        if not shutil.which(tool):
-            raise SystemExit(f"Required tool not found in PATH: {tool}")
+    return None
 
 
 # ---------------------------------------------------------------------------

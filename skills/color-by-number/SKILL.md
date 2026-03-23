@@ -5,11 +5,18 @@ description: Create color-by-number activity pages from a theme, optional color 
 
 # Color-by-Number Generator
 
-Use this skill to generate a color-by-number activity book with multiple pages. For every page the script produces two files: a full-color reference image and a matching black-and-white line-art image whose regions are numbered so the colorist knows which crayon to use.
+Use this skill to generate educational color-by-number activity books designed by child development specialists for ages **3-8 years old**. For every page the script produces two files: a full-color reference image and a matching black-and-white line-art image whose regions are numbered so the colorist knows which crayon to use.
 
-The generator creates **large, simple regions** perfect for coloring, with numbers placed **inside each color area** using advanced region analysis. The colored images strictly use only the specified palette colors for clean B&W conversion.
+The generator creates **5-10 large, simple regions** perfect for small hands to color, with numbers placed **inside each color area** using advanced region analysis. The colored images strictly use only the specified palette colors for clean B&W conversion.
 
-You can supply your own color palette or let the script fall back to a standard 8-color crayon set.
+**Educational Features:**
+- **Age-appropriate design:** Simple, recognizable shapes for ages 3-8
+- **Optimal complexity:** 5-10 distinct sections maximum per page
+- **Motor skill development:** Large regions sized for small hands
+- **Learning benefits:** Number recognition, color matching, fine motor skills
+- **Quality controlled:** High contrast, clear boundaries, child-friendly themes
+
+You can supply your own color palette or let the script fall back to a standard 6-color crayon set optimized for young children.
 
 ## When To Use It
 
@@ -45,16 +52,26 @@ python3 skills/color-by-number/scripts/generate_color_by_number.py \
 ```
 
 4. Confirm the outputs (two files per page plus a plan):
-   - `<theme-slug>-<timestamp>-page-001-colored.jpg` … `page-XXX-colored.jpg`
-   - `<theme-slug>-<timestamp>-page-001-bw.jpg` … `page-XXX-bw.jpg`
+   - `<theme-slug>-<timestamp>-page-001-colored.png` … `page-XXX-colored.png`
+   - `<theme-slug>-<timestamp>-page-001-bw.png` … `page-XXX-bw.png`
    - `<theme-slug>-<timestamp>-plan.md`
 
-### Custom color palette
+**Custom color palette for toddlers:**
 
 ```bash
 python3 skills/color-by-number/scripts/generate_color_by_number.py \
-  --theme 'Ocean creatures under the sea' \
-  --colors 'Light Blue,Dark Blue,Teal,Green,Yellow,Orange,White,Gray' \
+  --theme 'Simple farm animals for young children' \
+  --colors 'Red,Blue,Yellow,Green' \
+  --pages 3 \
+  --output-dir tmp
+```
+
+**Ocean theme with optimal 6-color set:**
+
+```bash
+python3 skills/color-by-number/scripts/generate_color_by_number.py \
+  --theme 'Friendly fish swimming in the ocean' \
+  --colors 'Light Blue,Dark Blue,Green,Yellow,Orange,Red' \
   --pages 4 \
   --output-dir tmp
 ```
@@ -100,6 +117,36 @@ Editable sections that affect the rerun:
 - `Planner model`
 - `Image model`
 
+## Educational Benefits
+
+The generator incorporates child development principles:
+
+**🧠 Cognitive Development:**
+- Number recognition (1-10)
+- Color matching and identification
+- Following sequential instructions
+- Pattern recognition
+
+**✋ Motor Skills:**
+- Fine motor control through coloring
+- Hand-eye coordination
+- Grip strength development
+- Precision and control
+
+**🎨 Design Principles:**
+- 5-10 sections maximum (optimal for attention span)
+- Large regions sized for small hands
+- High contrast for visual clarity
+- Simple, recognizable shapes
+- Age-appropriate themes (3-8 years)
+
+**📏 Quality Standards:**
+- Bold outlines for easy following
+- Numbers large enough to read clearly
+- Color legend on every page
+- Consistent color-number mapping
+- White background for contrast
+
 ## Color Key
 
 The script embeds the color key both in the Markdown plan and in every B&W image prompt so the AI numbers regions accordingly:
@@ -138,7 +185,7 @@ When `--colors` is not provided the script uses the standard 8-color crayon set:
      - Detects boundaries between color regions and draws black outlines
      - Places the palette-color number inside each region on a regular grid
      - Ensures every color that appears in the image is numbered at least once
-- Exports each version as a separate JPEG file
+- Exports each version as a separate PNG file so the final images stay locked to the exact palette colors
 - Writes a Markdown plan with the color key, inputs, prompts used, and any failures
 - Supports `--provider openai` and `--provider gemini` (experimental; image generation always uses OpenAI)
 - Defaults to OpenAI for maximum reliability
@@ -147,14 +194,15 @@ When `--colors` is not provided the script uses the standard 8-color crayon set:
 
 - **For image generation**: `OPENAI_API_KEY` or `OPEN_AI_TOKEN` must be set (required)
 - **For planning**: `GEMINI_API_KEY` or `GOOGLE_API_KEY` can be set to use Gemini for planning (optional)
-- **Python packages**: `Pillow` and `numpy` (installed automatically by `install.sh`)
-- This skill currently targets macOS because it relies on `sips`
-- `scripts/install.sh` bootstraps Homebrew, Python 3, Pillow, numpy, and verifies the Apple toolchain
+- **Python packages**: `Pillow`, `numpy`, and `scipy` (installed automatically by `install.sh`)
+- `scripts/install.sh` bootstraps Homebrew if needed, installs Python 3, Pillow, numpy, and scipy
 
 ## Notes
 
-- **Two files per page**: each page produces a colored JPG and a B&W numbered JPG
-- **Deterministic B&W**: the numbered page is derived from the colored image via palette quantization and edge detection – given the same colored image and palette, the B&W output is always identical
+- **Two files per page**: each page produces a colored PNG and a B&W numbered PNG
+- **Palette-locked color output**: the saved colored image is quantized to the exact requested palette, so it contains only flat palette colors with no extra shades
+- **Deterministic B&W**: the numbered page is derived from the palette-locked colored image via palette quantization and edge detection – given the same colored image and palette, the B&W output is always identical
+- **Complete numbering key**: every page includes a footer key that lists each number exactly once and covers the full palette with no missing colors
 - **Color key**: embedded in the Markdown plan for easy printing alongside the activity pages
 - **Character consistency**: the planner identifies and tracks main characters so they look the same across all pages
 - **Parallel generation**: all colored pages are generated in parallel (up to 3 concurrent AI requests); B&W conversion runs immediately after each colored page is saved
