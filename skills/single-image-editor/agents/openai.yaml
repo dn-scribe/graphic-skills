@@ -1,0 +1,4 @@
+interface:
+  display_name: "Single Image Editor"
+  short_description: "Edit one local image from a prompt"
+  default_prompt: "Use $single-image-editor to edit one local image with OpenAI or Gemini from a strict prompt."
