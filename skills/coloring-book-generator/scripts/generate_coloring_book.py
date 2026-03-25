@@ -29,7 +29,7 @@ DEFAULT_OPENAI_PLANNER_MODEL = "gpt-4o"
 DEFAULT_OPENAI_IMAGE_MODEL = "dall-e-3"
 DEFAULT_OPENAI_REFERENCE_IMAGE_MODEL = "gpt-image-1.5"
 DEFAULT_GEMINI_PLANNER_MODEL = "gemini-pro"
-DEFAULT_GEMINI_IMAGE_MODEL = "dall-e-3"  # Fallback to OpenAI for image generation
+DEFAULT_GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image"
 DEFAULT_PAGES = 5
 DEFAULT_STYLE = "pure black and white coloring book line art with thick black outlines only, no gray colors, no shading, minimal detail, suitable for children"
 
@@ -282,6 +282,46 @@ def post_gemini_json(model: str, payload: dict, api_key: str) -> dict:
         raise SystemExit(f"Gemini API request failed: HTTP {exc.code}\n{error_body}") from exc
     except urllib.error.URLError as exc:
         raise SystemExit(f"Network request failed: {exc.reason}") from exc
+
+
+def read_inline_image_part(image_path: pathlib.Path) -> dict[str, dict[str, str]]:
+    return {
+        "inlineData": {
+            "mimeType": guess_mime_type(image_path),
+            "data": base64.b64encode(image_path.read_bytes()).decode("ascii"),
+        }
+    }
+
+
+def extract_gemini_inline_image_data(response: dict) -> tuple[bytes | None, str | None]:
+    text_parts: list[str] = []
+    candidates = response.get("candidates")
+    if not isinstance(candidates, list):
+        return None, "Gemini response did not include candidates"
+
+    for candidate in candidates:
+        content = candidate.get("content", {})
+        parts = content.get("parts", [])
+        if not isinstance(parts, list):
+            continue
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            inline_data = part.get("inlineData") or part.get("inline_data")
+            if isinstance(inline_data, dict):
+                data = inline_data.get("data")
+                if isinstance(data, str) and data:
+                    try:
+                        return base64.b64decode(data), None
+                    except (ValueError, TypeError) as exc:
+                        return None, f"Gemini returned invalid inline image data: {exc}"
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                text_parts.append(text.strip())
+
+    if text_parts:
+        return None, f"Gemini returned text but no image: {' '.join(text_parts)}"
+    return None, f"Unexpected Gemini image response: {json.dumps(response, indent=2)}"
 
 
 def planner_messages(theme: str, style: str, pages: int, constraints: list[str] | None = None) -> tuple[str, str]:
@@ -609,14 +649,34 @@ def generate_image_gemini(
     prompt: str,
     reference_images: list[pathlib.Path] | None,
 ) -> tuple[bytes | None, str | None]:
-    # Gemini doesn't support image generation, so we fall back to OpenAI
-    # But we need an OpenAI API key for this
-    openai_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPEN_AI_TOKEN")
-    if not openai_key:
-        return None, "Gemini doesn't support image generation and no OpenAI API key available for fallback"
-    
-    print("Note: Using OpenAI for image generation since Gemini doesn't support it.")
-    return generate_image_openai(openai_key, "dall-e-3", prompt, reference_images)
+    coloring_prompt = build_coloring_prompt(prompt, reference_images)
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": coloring_prompt},
+                    *[read_inline_image_part(image_path) for image_path in (reference_images or [])],
+                ]
+            }
+        ],
+        "generationConfig": {
+            "responseModalities": ["Image"],
+            "imageConfig": {
+                "aspectRatio": "1:1",
+            },
+        },
+    }
+
+    try:
+        response = post_gemini_json(image_model, payload, api_key)
+        return extract_gemini_inline_image_data(response)
+    except SystemExit as exc:
+        error_msg = str(exc)
+        if "content_policy" in error_msg.lower() or "safety" in error_msg.lower():
+            return None, f"Gemini safety filter blocked the image: {error_msg}"
+        return None, f"Generation failed: {error_msg}"
+    except (KeyError, IndexError, TypeError) as exc:
+        return None, f"Unexpected Gemini response format: {exc}"
 
 
 def generate_image(
@@ -663,13 +723,21 @@ def generate_single_page(
 
 
 def convert_to_jpg(png_bytes: bytes, output_path: pathlib.Path) -> None:
-    """Convert PNG bytes to JPG file using sips."""
-    with tempfile.NamedTemporaryFile(suffix=".png") as temp_png:
-        temp_png.write(png_bytes)
-        temp_png.flush()
-        
+    """Convert image bytes to JPG file using sips."""
+    suffix = ".img"
+    if png_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        suffix = ".png"
+    elif png_bytes.startswith(b"\xff\xd8\xff"):
+        suffix = ".jpg"
+    elif png_bytes.startswith(b"RIFF") and png_bytes[8:12] == b"WEBP":
+        suffix = ".webp"
+
+    with tempfile.NamedTemporaryFile(suffix=suffix) as temp_image:
+        temp_image.write(png_bytes)
+        temp_image.flush()
+
         result = subprocess.run(
-            ["sips", "-s", "format", "jpeg", temp_png.name, "--out", str(output_path)],
+            ["sips", "-s", "format", "jpeg", temp_image.name, "--out", str(output_path)],
             capture_output=True,
             text=True,
         )

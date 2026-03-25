@@ -149,13 +149,13 @@ python3 skills/coloring-book-generator/scripts/generate_coloring_book.py \
   - Documents failures in the markdown plan for future reference
 - Exports each successful page as a separate JPEG file
 - Writes a Markdown log with the user inputs, generated picture descriptions, model names, prompts used, and any failures
-- Supports `--provider openai` and `--provider gemini` (experimental)
+- Supports `--provider openai` and `--provider gemini`
 - Defaults to OpenAI for maximum reliability
 
 ## Requirements
 
-- **For image generation**: `OPENAI_API_KEY` or `OPEN_AI_TOKEN` must be set (required for all runs since only OpenAI supports image generation)
-- **For planning**: `GEMINI_API_KEY` or `GOOGLE_API_KEY` can be set to use Gemini for planning (optional)
+- **For OpenAI runs**: `OPENAI_API_KEY` or `OPEN_AI_TOKEN` must be set
+- **For Gemini runs**: `GEMINI_API_KEY` or `GOOGLE_API_KEY` must be set
 - This skill currently targets macOS because it relies on `sips`
 - `scripts/install.sh` bootstraps Homebrew and Python 3 if needed, then verifies the Apple toolchain
 
@@ -168,6 +168,6 @@ python3 skills/coloring-book-generator/scripts/generate_coloring_book.py \
 - **Error resilience**: The script gracefully handles content policy violations and API errors by skipping problematic pages while continuing to generate the rest
 - Failed pages are clearly reported at the end with specific error messages and documented in the plan file
 - **Default**: The script uses OpenAI for both planning and image generation by default (most reliable)
-- **Gemini option**: Use `--provider gemini` for planning only (experimental), but image generation will still use OpenAI since Gemini doesn't support image generation
+- **Gemini option**: Use `--provider gemini` to use Gemini for both planning and image generation
 - If the user wants revisions, rerun the script with adjusted `theme`, `style`, or `pages`
 - Each page is saved as a separate file to allow for individual printing or use

@@ -130,13 +130,13 @@ The script generates:
 
 ## API Keys
 
-**Required:**
-- `OPENAI_API_KEY` - Required for reliable operation (both planning and image generation)
+**Required for OpenAI runs:**
+- `OPENAI_API_KEY` - Used for OpenAI planning and image generation
 
-**Optional (Experimental):**
-- `GEMINI_API_KEY` or `GOOGLE_API_KEY` - For planning only with `--provider gemini`
+**Required for Gemini runs:**
+- `GEMINI_API_KEY` or `GOOGLE_API_KEY` - Used for Gemini planning and Gemini image generation
 
 **Important Notes:** 
 - The script defaults to OpenAI for both planning and image generation for maximum reliability
-- Gemini support is experimental and may require specific model configurations
-- Even when using Gemini for planning, image generation always uses OpenAI (DALL-E)
+- `--provider gemini` now uses Gemini for both planning and image generation
+- Gemini image generation uses the Gemini image-capable model configured by `--image-model` or the script default
