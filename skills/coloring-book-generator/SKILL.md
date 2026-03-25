@@ -29,6 +29,7 @@ Use this skill when the user asks for any of the following:
    - `style`: may be a short style or a long prompt string (optional, defaults to "simple line art")
    - `pages`: number of pages to generate (default to 5)
    - `reference_image`: optional reference picture for style consistency
+   - `constraints`: optional hard requirements to apply across all pages; pass multiple `--constraint` flags
 2. If needed, install local prerequisites:
 
 ```bash
@@ -41,6 +42,8 @@ bash skills/coloring-book-generator/scripts/install.sh
 python3 skills/coloring-book-generator/scripts/generate_coloring_book.py \
   --theme 'Underwater adventure with friendly sea creatures' \
   --style "simple line art, thick black outlines, minimal detail" \
+  --constraint "square composition" \
+  --constraint "all characters are smiling" \
   --pages 5 \
   --output-dir tmp
 ```
@@ -56,6 +59,21 @@ python3 skills/coloring-book-generator/scripts/generate_coloring_book.py \
   --theme 'Underwater adventure with friendly sea creatures' \
   --style "simple line art, thick black outlines, minimal detail" \
   --reference-image /absolute/path/to/reference.png \
+  --constraint "square composition" \
+  --constraint "submarine windows are round" \
+  --pages 5 \
+  --output-dir tmp
+```
+
+Example with multiple structural constraints:
+
+```bash
+python3 skills/coloring-book-generator/scripts/generate_coloring_book.py \
+  --theme 'Happy Sukkot family scenes for young kids' \
+  --reference-image /absolute/path/to/sukkah-reference.png \
+  --constraint "square pictures" \
+  --constraint "the sukkah roof is flat with a horizontal top edge" \
+  --constraint "kids are smiling" \
   --pages 5 \
   --output-dir tmp
 ```
@@ -87,6 +105,7 @@ Editable sections that affect the rerun:
 
 - `Theme`
 - `Style`
+- `Constraints`
 - `Reference image`
 - `Number of pages`
 - `Provider`

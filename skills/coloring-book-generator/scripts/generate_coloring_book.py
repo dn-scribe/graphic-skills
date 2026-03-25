@@ -27,6 +27,7 @@ GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 DEFAULT_PROVIDER = "openai"
 DEFAULT_OPENAI_PLANNER_MODEL = "gpt-4o"
 DEFAULT_OPENAI_IMAGE_MODEL = "dall-e-3"
+DEFAULT_OPENAI_REFERENCE_IMAGE_MODEL = "gpt-image-1.5"
 DEFAULT_GEMINI_PLANNER_MODEL = "gemini-pro"
 DEFAULT_GEMINI_IMAGE_MODEL = "dall-e-3"  # Fallback to OpenAI for image generation
 DEFAULT_PAGES = 5
@@ -52,6 +53,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--reference-image",
         help="Optional local image path to use as a style reference during generation.",
+    )
+    parser.add_argument(
+        "--constraint",
+        action="append",
+        default=[],
+        help="Hard constraint to apply to every planned scene and image prompt. Repeat for multiple constraints.",
     )
     parser.add_argument(
         "--provider",
@@ -181,6 +188,12 @@ def slugify(value: str) -> str:
     return (slug[:48].rstrip("-")) or "coloring-book"
 
 
+def effective_openai_image_model(image_model: str, reference_images: list[pathlib.Path] | None) -> str:
+    if reference_images and not image_model.startswith("gpt-image-1"):
+        return DEFAULT_OPENAI_REFERENCE_IMAGE_MODEL
+    return image_model
+
+
 def post_json(url: str, payload: dict, api_key: str) -> dict:
     request = urllib.request.Request(
         url,
@@ -197,6 +210,54 @@ def post_json(url: str, payload: dict, api_key: str) -> dict:
     except urllib.error.HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="replace")
         # Re-raise with more information for better error handling downstream
+        raise SystemExit(f"API request failed: HTTP {exc.code}\n{error_body}") from exc
+    except urllib.error.URLError as exc:
+        raise SystemExit(f"Network request failed: {exc.reason}") from exc
+
+
+def post_multipart(
+    url: str,
+    fields: dict[str, str],
+    files: list[tuple[str, pathlib.Path]],
+    api_key: str,
+) -> dict:
+    boundary = f"----CodexBoundary{base64.urlsafe_b64encode(os.urandom(12)).decode('ascii').rstrip('=')}"
+    body = bytearray()
+
+    for name, value in fields.items():
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode("utf-8")
+        )
+
+    for field_name, file_path in files:
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(
+            (
+                f'Content-Disposition: form-data; name="{field_name}"; '
+                f'filename="{file_path.name}"\r\n'
+            ).encode("utf-8")
+        )
+        body.extend(f"Content-Type: {guess_mime_type(file_path)}\r\n\r\n".encode("utf-8"))
+        body.extend(file_path.read_bytes())
+        body.extend(b"\r\n")
+
+    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+
+    request = urllib.request.Request(
+        url,
+        data=bytes(body),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=240) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
         raise SystemExit(f"API request failed: HTTP {exc.code}\n{error_body}") from exc
     except urllib.error.URLError as exc:
         raise SystemExit(f"Network request failed: {exc.reason}") from exc
@@ -223,13 +284,15 @@ def post_gemini_json(model: str, payload: dict, api_key: str) -> dict:
         raise SystemExit(f"Network request failed: {exc.reason}") from exc
 
 
-def planner_messages(theme: str, style: str, pages: int) -> tuple[str, str]:
+def planner_messages(theme: str, style: str, pages: int, constraints: list[str] | None = None) -> tuple[str, str]:
+    normalized_constraints = [constraint.strip() for constraint in (constraints or []) if constraint.strip()]
     system_prompt = (
         "You are a coloring book planner for storyline continuity. Return valid JSON only. "
         "Create exactly the requested number of distinct picture descriptions for coloring book pages that tell a cohesive story with CONSISTENT CHARACTERS. "
         "First identify the main characters from the theme, then create pages that show these same characters in different scenes. "
         "Each page should be suitable for PURE BLACK AND WHITE line art with thick black outlines only. "
         "NO gray colors, NO shading, NO gradients - only pure black lines on white background. "
+        "Treat any explicit structural constraints or forbidden shapes in the theme/style as non-negotiable and repeat them in the planned scenes. "
         "Do not include markdown fences."
     )
     user_payload = {
@@ -243,6 +306,7 @@ def planner_messages(theme: str, style: str, pages: int) -> tuple[str, str]:
             "art_style": "pure black and white line art with thick black outlines only, absolutely no gray colors or shading",
             "framing": "ensure all characters, objects, and scene elements are COMPLETELY contained within the page boundaries with comfortable white margins. NO cropped or cut-off elements at any edge.",
             "complexity": "appropriate detail level for coloring activities",
+            "hard_constraints": normalized_constraints,
         },
         "output_schema": {
             "theme_title": "short human-readable title for the story",
@@ -262,14 +326,82 @@ def planner_messages(theme: str, style: str, pages: int) -> tuple[str, str]:
     return system_prompt, json.dumps(user_payload, ensure_ascii=True)
 
 
+def derive_hard_constraints(theme: str, style: str) -> list[str]:
+    combined = f"{theme}\n{style}".lower()
+    constraints: list[str] = []
+    if "sukkah" in combined and any(
+        phrase in combined
+        for phrase in ("flat roof", "flat-roof", "flat top", "flat horizontal roof")
+    ):
+        constraints.extend(
+            [
+                (
+                    "Any sukkah shown must be a simple rectangular structure with a flat horizontal "
+                    "roof line and flat schach covering."
+                ),
+                (
+                    "Never show a pitched roof, gable roof, triangular roof, pointed roof, "
+                    "house roof, hut roof, or cabin roof."
+                ),
+            ]
+        )
+    return constraints
+
+
+def normalize_constraints(constraints: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for constraint in constraints or []:
+        clean = " ".join(constraint.strip().split())
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(clean)
+    return normalized
+
+
+def collect_constraints(theme: str, style: str, extra_constraints: list[str] | None = None) -> list[str]:
+    return normalize_constraints([*derive_hard_constraints(theme, style), *(extra_constraints or [])])
+
+
+def apply_hard_constraints_to_plan(
+    plan: dict,
+    theme: str,
+    style: str,
+    extra_constraints: list[str] | None = None,
+) -> dict:
+    constraints = collect_constraints(theme, style, extra_constraints)
+    if not constraints:
+        return plan
+
+    constraint_text = " ".join(constraints)
+    base_prompt = plan.get("base_prompt", "").strip()
+    if constraint_text not in base_prompt:
+        plan["base_prompt"] = f"{base_prompt} {constraint_text}".strip()
+
+    picture_descriptions = plan.get("picture_descriptions", [])
+    updated_descriptions: list[str] = []
+    for description in picture_descriptions:
+        desc = description.strip()
+        if constraint_text not in desc:
+            desc = f"{desc} {constraint_text}"
+        updated_descriptions.append(desc)
+    plan["picture_descriptions"] = updated_descriptions
+    return plan
+
+
 def build_coloring_plan_openai(
     api_key: str,
     planner_model: str,
     theme: str,
     style: str,
     pages: int,
+    constraints: list[str] | None = None,
 ) -> tuple[dict, str, str]:
-    system_prompt, user_prompt = planner_messages(theme, style, pages)
+    system_prompt, user_prompt = planner_messages(theme, style, pages, constraints)
     payload = {
         "model": planner_model,
         "response_format": {"type": "json_object"},
@@ -316,6 +448,7 @@ def build_coloring_plan_openai(
     if not isinstance(theme_title, str) or not theme_title.strip():
         plan["theme_title"] = theme[:80].strip()
 
+    plan = apply_hard_constraints_to_plan(plan, theme, style, constraints)
     return plan, system_prompt, user_prompt
 
 
@@ -325,8 +458,9 @@ def build_coloring_plan_gemini(
     theme: str,
     style: str,
     pages: int,
+    constraints: list[str] | None = None,
 ) -> tuple[dict, str, str]:
-    system_prompt, user_prompt = planner_messages(theme, style, pages)
+    system_prompt, user_prompt = planner_messages(theme, style, pages, constraints)
     schema = {
         "type": "object",
         "properties": {
@@ -371,6 +505,7 @@ def build_coloring_plan_gemini(
     except json.JSONDecodeError as exc:
         raise SystemExit(f"Gemini planner did not return valid JSON:\n{content}") from exc
 
+    plan = apply_hard_constraints_to_plan(plan, theme, style, constraints)
     return plan, system_prompt, user_prompt
 
 
@@ -381,29 +516,58 @@ def build_coloring_plan(
     theme: str,
     style: str,
     pages: int,
+    constraints: list[str] | None = None,
 ) -> tuple[dict, str, str]:
     if provider == "openai":
-        return build_coloring_plan_openai(api_key, planner_model, theme, style, pages)
-    return build_coloring_plan_gemini(api_key, planner_model, theme, style, pages)
+        return build_coloring_plan_openai(api_key, planner_model, theme, style, pages, constraints)
+    return build_coloring_plan_gemini(api_key, planner_model, theme, style, pages, constraints)
 
 
-def generate_image_openai(api_key: str, image_model: str, prompt: str, reference_image: pathlib.Path | None) -> tuple[bytes | None, str | None]:
+def generate_image_openai(
+    api_key: str,
+    image_model: str,
+    prompt: str,
+    reference_images: list[pathlib.Path] | None,
+) -> tuple[bytes | None, str | None]:
     # Add coloring book specific prompt additions with emphasis on pure black and white
-    coloring_prompt = f"Pure black and white line art coloring book page. {prompt}. IMPORTANT: Only pure black lines on white background, absolutely no gray colors, no shading, no gradients, thick black outlines only, simple design suitable for children to color in."
-    
-    if reference_image:
-        coloring_prompt = f"{coloring_prompt} (Use similar style and composition as reference image provided)"
-    
-    payload = {
-        "model": image_model,
-        "prompt": coloring_prompt,
-        "n": 1,
-        "size": "1024x1024",
-        "response_format": "b64_json",
-    }
-    
+    coloring_prompt = (
+        f"Pure black and white line art coloring book page. {prompt}. IMPORTANT: Only pure black lines on "
+        "white background, absolutely no gray colors, no shading, no gradients, thick black outlines only, "
+        "simple design suitable for children to color in. If a sukkah or similar structure appears, it must "
+        "have a flat horizontal roof line, never a pitched, triangular, pointed, or house-like roof."
+    )
+    effective_model = effective_openai_image_model(image_model, reference_images)
+
     try:
-        response = post_json(IMAGES_URL, payload, api_key)
+        if reference_images:
+            coloring_prompt = (
+                f"{coloring_prompt} Use the attached reference images as hard visual guidance. Preserve the "
+                "flat roof silhouette and simple rectangular structure from the first reference image."
+            )
+            response = post_multipart(
+                IMAGE_EDITS_URL,
+                fields={
+                    "model": effective_model,
+                    "prompt": coloring_prompt,
+                    "n": "1",
+                    "size": "1024x1024",
+                    "input_fidelity": "high",
+                },
+                files=[
+                    ("image" if len(reference_images) == 1 else "image[]", image_path)
+                    for image_path in reference_images
+                ],
+                api_key=api_key,
+            )
+        else:
+            payload = {
+                "model": effective_model,
+                "prompt": coloring_prompt,
+                "n": 1,
+                "size": "1024x1024",
+                "response_format": "b64_json",
+            }
+            response = post_json(IMAGES_URL, payload, api_key)
         b64_data = response["data"][0]["b64_json"]
         return base64.b64decode(b64_data), None
     except SystemExit as exc:
@@ -419,7 +583,7 @@ def generate_image_openai(api_key: str, image_model: str, prompt: str, reference
         return None, f"Unexpected response format: {exc}"
 
 
-def build_coloring_prompt(prompt: str, reference_image: pathlib.Path | None) -> str:
+def build_coloring_prompt(prompt: str, reference_images: list[pathlib.Path] | None) -> str:
     coloring_prompt = (
         "Pure black and white line art coloring book page suitable for children. "
         f"{prompt}. CRITICAL REQUIREMENTS: Only pure black lines on pure white background, absolutely no gray colors, no shading, "
@@ -428,9 +592,10 @@ def build_coloring_prompt(prompt: str, reference_image: pathlib.Path | None) -> 
         "NO cropped subjects, NO cut-off elements at any edge. Leave comfortable white margins around all content. "
         "All subjects must be completely visible and properly framed within the page. "
         "Maintain consistent character appearances - same facial features, clothing, proportions, and distinctive characteristics across all pages. "
-        "Keep the composition simple and not crowded."
+        "Keep the composition simple and not crowded. If a sukkah or similar structure appears, it must have a flat horizontal roof line, "
+        "never a pitched, triangular, pointed, or house-like roof."
     )
-    if reference_image:
+    if reference_images:
         coloring_prompt = (
             f"{coloring_prompt} Use the attached reference image only for style cues such as line weight, spacing, "
             "and page simplicity."
@@ -438,7 +603,12 @@ def build_coloring_prompt(prompt: str, reference_image: pathlib.Path | None) -> 
     return coloring_prompt
 
 
-def generate_image_gemini(api_key: str, image_model: str, prompt: str, reference_image: pathlib.Path | None) -> tuple[bytes | None, str | None]:
+def generate_image_gemini(
+    api_key: str,
+    image_model: str,
+    prompt: str,
+    reference_images: list[pathlib.Path] | None,
+) -> tuple[bytes | None, str | None]:
     # Gemini doesn't support image generation, so we fall back to OpenAI
     # But we need an OpenAI API key for this
     openai_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPEN_AI_TOKEN")
@@ -446,21 +616,27 @@ def generate_image_gemini(api_key: str, image_model: str, prompt: str, reference
         return None, "Gemini doesn't support image generation and no OpenAI API key available for fallback"
     
     print("Note: Using OpenAI for image generation since Gemini doesn't support it.")
-    return generate_image_openai(openai_key, "dall-e-3", prompt, reference_image)
+    return generate_image_openai(openai_key, "dall-e-3", prompt, reference_images)
 
 
-def generate_image(provider: str, api_key: str, image_model: str, prompt: str, reference_image: pathlib.Path | None = None) -> tuple[bytes | None, str | None]:
+def generate_image(
+    provider: str,
+    api_key: str,
+    image_model: str,
+    prompt: str,
+    reference_images: list[pathlib.Path] | None = None,
+) -> tuple[bytes | None, str | None]:
     if provider == "openai":
-        return generate_image_openai(api_key, image_model, prompt, reference_image)
-    return generate_image_gemini(api_key, image_model, prompt, reference_image)
+        return generate_image_openai(api_key, image_model, prompt, reference_images)
+    return generate_image_gemini(api_key, image_model, prompt, reference_images)
 
 
 def generate_single_page(
-    page_info: tuple[int, str, str, str, str, str, str, pathlib.Path | None, pathlib.Path, str]
+    page_info: tuple[int, str, str, str, str, str, str, list[pathlib.Path] | None, pathlib.Path, str]
 ) -> tuple[int, pathlib.Path | None, dict | None]:
     """Generate a single page. Returns (page_number, page_file_path, failure_info)"""
     (i, description, base_prompt, provider, api_key, image_model, base_name, 
-     reference_image, output_dir, page_num) = page_info
+     reference_images, output_dir, page_num) = page_info
     
     page_file = output_dir / f"{base_name}-page-{page_num}.jpg"
     
@@ -468,7 +644,7 @@ def generate_single_page(
     page_prompt = f"{base_prompt}. Page {i}: {description}"
     
     print(f"Generating page {i}: {description[:100]}{'...' if len(description) > 100 else ''}")
-    raw_image_bytes, error_msg = generate_image(provider, api_key, image_model, page_prompt, reference_image)
+    raw_image_bytes, error_msg = generate_image(provider, api_key, image_model, page_prompt, reference_images)
     
     if raw_image_bytes is None:
         # Page generation failed
@@ -502,7 +678,7 @@ def convert_to_jpg(png_bytes: bytes, output_path: pathlib.Path) -> None:
 
 
 def load_plan_from_markdown(md_path: pathlib.Path) -> tuple[
-    dict, str, str, int, str | None, str | None, str | None, str, str, pathlib.Path | None
+    dict, str, str, int, list[str], str | None, str | None, str | None, str, str, pathlib.Path | None
 ]:
     """Load plan from markdown file for replay functionality."""
     content = md_path.read_text()
@@ -511,6 +687,7 @@ def load_plan_from_markdown(md_path: pathlib.Path) -> tuple[
     theme = ""
     style = ""
     pages = 5
+    constraints: list[str] = []
     provider = None
     planner_model = None
     image_model = None
@@ -535,6 +712,12 @@ def load_plan_from_markdown(md_path: pathlib.Path) -> tuple[
         ref_path = ref_match.group(1).strip()
         if ref_path != "None" and ref_path != "-":
             reference_image = pathlib.Path(ref_path)
+    constraints_section = re.search(r"## Constraints\s*(.+?)(?=##|$)", content, re.DOTALL)
+    if constraints_section:
+        for line in constraints_section.group(1).strip().split("\n"):
+            line = line.strip()
+            if line.startswith("- "):
+                constraints.append(line[2:].strip())
     
     # Extract picture descriptions from markdown
     picture_descriptions = []
@@ -551,8 +734,8 @@ def load_plan_from_markdown(md_path: pathlib.Path) -> tuple[
         "picture_descriptions": picture_descriptions,
         "base_prompt": f"Black and white coloring book style line art. {style}. Thick black outlines, minimal detail, suitable for coloring."
     }
-    
-    return plan, theme, style, pages, provider, planner_model, image_model, planner_system_prompt, planner_user_prompt, reference_image
+    plan = apply_hard_constraints_to_plan(plan, theme, style, constraints)
+    return plan, theme, style, pages, constraints, provider, planner_model, image_model, planner_system_prompt, planner_user_prompt, reference_image
 
 
 def write_plan_log(
@@ -561,6 +744,7 @@ def write_plan_log(
     theme: str,
     style: str,
     pages: int,
+    constraints: list[str],
     reference_image: pathlib.Path | None,
     planner_model: str,
     image_model: str,
@@ -587,6 +771,12 @@ def write_plan_log(
             files_section += f"- **Page {failure['page']}**: {failure['error']}\n"
             files_section += f"  - Description: {failure['description']}\n"
         files_section += "\n"
+
+    constraints_section = ""
+    if constraints:
+        constraints_section = "## Constraints\n\n"
+        constraints_section += "\n".join(f"- {constraint}" for constraint in constraints)
+        constraints_section += "\n\n"
     
     content = f"""# Coloring Book Generation Plan
 
@@ -603,7 +793,7 @@ Generated: {dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 - **Planner model**: {planner_model}
 - **Image model**: {image_model}
 
-## Main Characters
+{constraints_section}## Main Characters
 
 {chr(10).join(f"- {char}" for char in plan.get("main_characters", ["Not specified"])) if plan.get("main_characters") else "- Not specified"}
 
@@ -650,6 +840,7 @@ def main() -> int:
     planner_system_prompt = ""
     planner_user_prompt = ""
     reference_image: pathlib.Path | None = resolve_reference_image_path(args.reference_image)
+    cli_constraints = normalize_constraints(args.constraint)
     
     if args.replay_from_md:
         replay_source = pathlib.Path(args.replay_from_md).expanduser().resolve()
@@ -660,6 +851,7 @@ def main() -> int:
             theme,
             style,
             pages,
+            replay_constraints,
             replay_provider,
             replay_planner_model,
             replay_image_model,
@@ -667,6 +859,7 @@ def main() -> int:
             planner_user_prompt,
             replay_reference_image,
         ) = load_plan_from_markdown(replay_source)
+        constraints = normalize_constraints([*replay_constraints, *cli_constraints])
         provider = replay_provider or args.provider or default_provider()
         planner_model = args.planner_model or replay_planner_model or default_planner_model(provider, get_api_key(provider) if provider == "gemini" else None)
         image_model = args.image_model or replay_image_model or default_image_model(provider)
@@ -679,6 +872,7 @@ def main() -> int:
         theme = args.theme
         style = args.style or DEFAULT_STYLE
         pages = args.pages
+        constraints = cli_constraints
         planner_model = args.planner_model or default_planner_model(provider, get_api_key(provider) if provider == "gemini" else None)
         image_model = args.image_model or default_image_model(provider)
         api_key = get_api_key(provider)
@@ -689,6 +883,7 @@ def main() -> int:
             theme=theme,
             style=style,
             pages=pages,
+            constraints=constraints,
         )
 
     if args.replay_from_md:
@@ -696,6 +891,11 @@ def main() -> int:
 
     if pages < 1 or pages > 20:
         raise SystemExit("--pages must be between 1 and 20.")
+
+    constraints = collect_constraints(theme, style, constraints)
+
+    initial_reference_images = [reference_image] if reference_image else None
+    image_model = effective_openai_image_model(image_model, initial_reference_images if provider == "openai" else None)
 
     timestamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     base_name = f"{slugify(theme)}-{timestamp}"
@@ -710,7 +910,7 @@ def main() -> int:
     page_prompt = f"{plan['base_prompt']}. Page 1: {first_description}"
     
     print(f"Generating page 1/{pages}: {first_description}")
-    raw_image_bytes, error_msg = generate_image(provider, api_key, image_model, page_prompt, reference_image)
+    raw_image_bytes, error_msg = generate_image(provider, api_key, image_model, page_prompt, initial_reference_images)
     
     if raw_image_bytes is not None:
         # First page successful - save it and use as reference
@@ -741,7 +941,10 @@ def main() -> int:
             page_num = f"{i:03d}"
             page_info = (
                 i, description, plan['base_prompt'], provider, api_key, image_model,
-                base_name, first_page_reference, output_dir, page_num
+                base_name,
+                [path for path in (reference_image, first_page_reference) if path is not None] or None,
+                output_dir,
+                page_num,
             )
             page_info_list.append(page_info)
         
@@ -776,6 +979,7 @@ def main() -> int:
         theme=theme,
         style=style,
         pages=pages,
+        constraints=constraints,
         reference_image=reference_image,
         planner_model=planner_model,
         image_model=image_model,

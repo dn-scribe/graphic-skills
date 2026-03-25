@@ -15,6 +15,8 @@ For storylines with recurring characters, include detailed descriptions:
 # Character-focused theme with specific descriptions
 python3 scripts/generate_coloring_book.py \
   --theme "Captain Sam (red beard, blue sailor hat, striped shirt) and his parrot Polly (bright green, yellow beak) search for treasure on a tropical island" \
+  --constraint "square pictures" \
+  --constraint "all characters are smiling" \
   --pages 5 \
   --output-dir tmp
 ```
@@ -57,7 +59,24 @@ Use a reference image to maintain consistent style:
 python3 scripts/generate_coloring_book.py \
   --theme 'Space adventure with astronauts and rockets' \
   --reference-image /path/to/style-reference.jpg \
+  --constraint "square composition" \
+  --constraint "astronaut helmets stay round in every scene" \
   --pages 4 \
+  --output-dir tmp
+```
+
+## Multiple Hard Constraints
+
+Use repeated `--constraint` flags for non-negotiable rules that should apply across planning and image generation:
+
+```bash
+python3 scripts/generate_coloring_book.py \
+  --theme 'Happy Sukkot family scenes for young kids' \
+  --reference-image /path/to/sukkah-reference.png \
+  --constraint "square pictures" \
+  --constraint "the sukkah roof is flat with a horizontal top edge" \
+  --constraint "kids are smiling" \
+  --pages 5 \
   --output-dir tmp
 ```
 
@@ -90,6 +109,7 @@ python3 scripts/generate_coloring_book.py \
 The script generates:
 - Individual JPEG files for each **successfully generated** page (`theme-timestamp-page-001.jpg`, etc.)
 - A markdown plan file (`theme-timestamp-plan.md`) for reproducibility
+- Any repeated hard constraints used for the run, recorded in the markdown plan
 - A reference PNG file from the first successful page for style consistency
 
 **Performance**: Pages are generated in parallel after the first reference page for faster completion.
