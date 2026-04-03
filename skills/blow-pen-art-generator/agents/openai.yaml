@@ -1,0 +1,4 @@
+interface:
+  display_name: "Blow Pen Art Generator"
+  short_description: "Generate printable blow-pen art template pages with border decorations"
+  default_prompt: "Use $blow-pen-art-generator to create blow pen art template pages from a theme, optional template image, style, and page count."
